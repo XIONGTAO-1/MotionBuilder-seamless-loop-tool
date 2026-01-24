@@ -278,6 +278,82 @@ class LoopProcessorService:
         
         print(f"[SeamlessLoopTool] Wrote {bone_count} bones to new Take")
 
+    def export_fbx(
+        self,
+        path: str,
+        target_fps: float,
+        root_name: str = "Hips",
+    ) -> None:
+        """
+        Export processed data to FBX at a user-selected FPS using a sandbox take.
+        """
+        if self.processed_trajectory is None and not getattr(self, "processed_data", None):
+            raise RuntimeError("No processed data. Run Process before export.")
+
+        if not hasattr(self.adapter, "create_sandbox_take"):
+            raise RuntimeError("Adapter does not support sandbox export")
+
+        original_take = None
+        if hasattr(self.adapter, "get_current_take_name"):
+            original_take = self.adapter.get_current_take_name()
+
+        sandbox_take = self.adapter.create_sandbox_take("_inplace")
+
+        try:
+            if hasattr(self.adapter, "clear_all_animation"):
+                self.adapter.clear_all_animation(root_name)
+
+            if getattr(self, "processed_data", None):
+                export_data = {k: v.copy() for k, v in self.processed_data.items()}
+                root_traj = export_data.get(root_name)
+            else:
+                root_traj = self.processed_trajectory.copy()
+                export_data = {root_name: root_traj}
+
+            if root_traj is None:
+                root_traj = self.processed_trajectory.copy()
+                export_data[root_name] = root_traj
+
+            source_fps = (
+                self.adapter.get_current_fps()
+                if hasattr(self.adapter, "get_current_fps")
+                else 30.0
+            )
+            end_idx = self.root_processor.snap_end_frame_to_fps(
+                num_frames=len(root_traj),
+                source_fps=source_fps,
+                target_fps=target_fps,
+            )
+            if end_idx < len(root_traj) - 1:
+                for name, traj in export_data.items():
+                    export_data[name] = traj[: end_idx + 1].copy()
+
+            for name, traj in export_data.items():
+                export_data[name] = self.root_processor.blend_loop_ends(traj)
+
+            for bone_name, traj in export_data.items():
+                if hasattr(self.adapter, "set_node_trajectory"):
+                    self.adapter.set_node_trajectory(bone_name, traj, start_frame=0)
+                else:
+                    self.adapter.set_root_trajectory(bone_name, traj, start_frame=0)
+
+            if hasattr(self.adapter, "_set_take_time_span"):
+                self.adapter._set_take_time_span(0, end_idx)
+
+            if hasattr(self.adapter, "set_transport_fps"):
+                self.adapter.set_transport_fps(target_fps)
+            if hasattr(self.adapter, "plot_animation_on_skeleton"):
+                self.adapter.plot_animation_on_skeleton(target_fps)
+
+            if hasattr(self.adapter, "export_take_to_fbx"):
+                self.adapter.export_take_to_fbx(path, sandbox_take)
+        finally:
+            if original_take and hasattr(self.adapter, "set_current_take"):
+                try:
+                    self.adapter.set_current_take(original_take)
+                except Exception:
+                    pass
+
     def create_seamless_loop(
         self,
         root_name: str = "Hips",

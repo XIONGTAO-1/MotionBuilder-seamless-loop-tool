@@ -240,3 +240,11 @@ class TestLoopProcessorService:
         assert np.allclose(updated[:, 0], 0.0), "X should be zeroed after apply"
         assert adapter.frame_range == (0, len(updated) - 1)
         assert adapter.animation_cleared is True
+
+    def test_export_requires_processed_data(self):
+        """export_fbx should require processed data."""
+        adapter = MockMoBuAdapter()
+        service = LoopProcessorService(adapter)
+
+        with pytest.raises(RuntimeError):
+            service.export_fbx("/tmp/out.fbx", target_fps=60)
