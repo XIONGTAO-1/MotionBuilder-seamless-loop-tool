@@ -8,6 +8,8 @@ import logging
 
 logger = logging.getLogger(__name__)
 
+from ui.export_fps import get_export_fps_choices, get_default_export_fps
+
 # Try to import PySide2 (available in MotionBuilder 2024)
 try:
     from PySide2 import QtWidgets, QtCore
@@ -29,8 +31,15 @@ except ImportError:
         IN_MOTIONBUILDER = False
         logger.warning("PySide2/PySide6 not available")
 
+class _QtFallbackWidget:
+    def __init__(self, *args, **kwargs):
+        pass
 
-class SeamlessLoopToolWindow(QtWidgets.QWidget):
+
+QtBaseWidget = QtWidgets.QWidget if QtWidgets is not None else _QtFallbackWidget
+
+
+class SeamlessLoopToolWindow(QtBaseWidget):
     """
     Qt-based Tool Window for creating seamless animation loops.
     
@@ -136,11 +145,20 @@ class SeamlessLoopToolWindow(QtWidgets.QWidget):
         self.spin_target_rot_y.setSingleStep(1.0)
         self.spin_target_rot_y.setValue(self.target_rot_y)
 
+        self.combo_export_fps = QtWidgets.QComboBox()
+        export_choices = get_export_fps_choices()
+        for fps in export_choices:
+            self.combo_export_fps.addItem(str(fps), fps)
+        default_export_fps = get_default_export_fps()
+        if default_export_fps in export_choices:
+            self.combo_export_fps.setCurrentIndex(export_choices.index(default_export_fps))
+
         advanced_layout.addRow(QLabel("Min Cycle Frames"), self.spin_min_cycle_frames)
         advanced_layout.addRow(QLabel("Max Cycle Frames"), self.spin_max_cycle_frames)
         advanced_layout.addRow(QLabel("Min Avg Velocity"), self.spin_min_avg_velocity)
         advanced_layout.addRow(QLabel("Min Vertical Bounce"), self.spin_min_vertical_bounce)
         advanced_layout.addRow(QLabel("Hips RotY Target"), self.spin_target_rot_y)
+        advanced_layout.addRow(QLabel("Export FPS"), self.combo_export_fps)
         layout.addWidget(advanced_group)
         
         # Analyze Button
@@ -157,10 +175,18 @@ class SeamlessLoopToolWindow(QtWidgets.QWidget):
         self.btn_process.clicked.connect(self._on_process_clicked)
         layout.addWidget(self.btn_process)
         
-        # Apply Button
+        # Apply / Export Buttons
         self.btn_apply = QtWidgets.QPushButton("3. Apply Changes to Scene")
         self.btn_apply.clicked.connect(self._on_apply_clicked)
-        layout.addWidget(self.btn_apply)
+
+        self.btn_export = QtWidgets.QPushButton("4. Export FBX")
+        self.btn_export.clicked.connect(self._on_export_clicked)
+        self.btn_export.setEnabled(False)
+
+        apply_layout = QtWidgets.QHBoxLayout()
+        apply_layout.addWidget(self.btn_apply)
+        apply_layout.addWidget(self.btn_export)
+        layout.addLayout(apply_layout)
         
         layout.addStretch()
         
@@ -214,6 +240,15 @@ class SeamlessLoopToolWindow(QtWidgets.QWidget):
         self.root_name = self.edit_root.text().strip() or "Hips"
         self.blend_frames = self.edit_blend.value()
         self.target_rot_y = self.spin_target_rot_y.value()
+
+    def _get_export_fps(self) -> float:
+        data = self.combo_export_fps.currentData()
+        if data is not None:
+            return float(data)
+        try:
+            return float(self.combo_export_fps.currentText())
+        except ValueError:
+            return float(get_default_export_fps())
     
     def _check_service(self) -> bool:
         """Check if service is ready."""
@@ -316,6 +351,7 @@ class SeamlessLoopToolWindow(QtWidgets.QWidget):
                 )
                 self.processed = True
                 self._set_status(f"Processed: {len(trajectory)} frames (root only)")
+            self.btn_export.setEnabled(self.processed)
         except Exception as e:
             self._set_status(f"Error: {e}")
             import traceback
@@ -346,6 +382,36 @@ class SeamlessLoopToolWindow(QtWidgets.QWidget):
                 self._set_status("Changes applied to scene (root only)!")
         except Exception as e:
             self._set_status(f"Error: {e}")
+
+    def _on_export_clicked(self):
+        """Handle Export button click - exports processed data to FBX."""
+        if not self.processed:
+            self._set_status("Please Process first!")
+            return
+        if not self._check_service():
+            return
+        self._get_params()
+
+        path, _ = QtWidgets.QFileDialog.getSaveFileName(
+            self,
+            "Export FBX",
+            "",
+            "FBX Files (*.fbx)"
+        )
+        if not path:
+            self._set_status("Export canceled")
+            return
+
+        target_fps = self._get_export_fps()
+        self._set_status(f"Exporting FBX at {target_fps} fps...")
+
+        try:
+            self.service.export_fbx(path, target_fps=target_fps, root_name=self.root_name)
+            self._set_status(f"Exported: {path}")
+        except Exception as e:
+            self._set_status(f"Error: {e}")
+            import traceback
+            traceback.print_exc()
 
 
 # Global reference to keep window alive
