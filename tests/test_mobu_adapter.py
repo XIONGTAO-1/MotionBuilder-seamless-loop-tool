@@ -88,6 +88,16 @@ class TestMockMoBuAdapter:
         
         np.testing.assert_array_almost_equal(result["Hips"], custom_matrix)
 
+    def test_generate_unique_take_name_appends_suffix(self):
+        """generate_unique_take_name should append numeric suffix if needed."""
+        name = adapter_module.generate_unique_take_name(
+            "Walk",
+            ["Walk_inplace", "Walk_inplace_1"],
+            suffix="_inplace",
+        )
+
+        assert name == "Walk_inplace_2"
+
 
 class TestMoBuAdapterSetRootTrajectory:
     """Tests for MoBuAdapter with stubbed MotionBuilder objects."""

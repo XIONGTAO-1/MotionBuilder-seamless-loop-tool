@@ -12,10 +12,16 @@ from typing import Optional, Tuple, Dict
 IN_MOTIONBUILDER = False
 FBSystem = None
 FBPlayerControl = None
+FBApplication = None
 FBFindModelByLabelName = None
 FBFindModelByName = None
 FBTime = None
 FBTimeSpan = None
+FBTimeMode = None
+FBPlotOptions = None
+FBCharacterPlotWhere = None
+FBFbxOptions = None
+FBElementAction = None
 FBInterpolation = None
 FBTangentMode = None
 FBModelList = None
@@ -33,8 +39,14 @@ try:
     # Import core classes
     FBSystem = getattr(pyfbsdk, 'FBSystem', None)
     FBPlayerControl = getattr(pyfbsdk, 'FBPlayerControl', None)
+    FBApplication = getattr(pyfbsdk, 'FBApplication', None)
     FBTime = getattr(pyfbsdk, 'FBTime', None)
     FBTimeSpan = getattr(pyfbsdk, 'FBTimeSpan', None)
+    FBTimeMode = getattr(pyfbsdk, 'FBTimeMode', None)
+    FBPlotOptions = getattr(pyfbsdk, 'FBPlotOptions', None)
+    FBCharacterPlotWhere = getattr(pyfbsdk, 'FBCharacterPlotWhere', None)
+    FBFbxOptions = getattr(pyfbsdk, 'FBFbxOptions', None)
+    FBElementAction = getattr(pyfbsdk, 'FBElementAction', None)
     FBInterpolation = getattr(pyfbsdk, 'FBInterpolation', None)
     FBTangentMode = getattr(pyfbsdk, 'FBTangentMode', None)
     FBModel = getattr(pyfbsdk, 'FBModel', None)
@@ -62,6 +74,19 @@ except Exception as e:
     IN_MOTIONBUILDER = False
 
 
+def generate_unique_take_name(base_name: str, existing: list, suffix: str = "_inplace") -> str:
+    """
+    Generate a unique take name using a suffix and numeric increment.
+    """
+    candidate = f"{base_name}{suffix}"
+    if candidate not in existing:
+        return candidate
+    index = 1
+    while f"{candidate}_{index}" in existing:
+        index += 1
+    return f"{candidate}_{index}"
+
+
 class MoBuAdapter:
     """
     Adapter for reading and writing animation data from MotionBuilder.
@@ -83,6 +108,109 @@ class MoBuAdapter:
     def get_current_take_name(self) -> str:
         """Get the name of the current take."""
         return self._system.CurrentTake.Name
+
+    def get_take_names(self) -> list:
+        """Return all take names in the current scene."""
+        return [take.Name for take in self._system.Scene.Takes]
+
+    def set_current_take(self, take_name: str) -> None:
+        """Switch the current take by name."""
+        for take in self._system.Scene.Takes:
+            if take.Name == take_name:
+                self._system.CurrentTake = take
+                return
+        raise ValueError(f"Take '{take_name}' not found")
+
+    def create_sandbox_take(self, suffix: str = "_inplace") -> str:
+        """
+        Create a sandbox take for export and switch to it.
+        """
+        original_take = self._system.CurrentTake
+        existing = self.get_take_names()
+        new_name = generate_unique_take_name(original_take.Name, existing, suffix=suffix)
+        sandbox_take = original_take.CopyTake(new_name)
+        self._system.CurrentTake = sandbox_take
+        return new_name
+
+    def get_current_fps(self) -> float:
+        """
+        Get the current FPS from the transport time mode.
+        """
+        if self._player is None or FBTime is None:
+            return 30.0
+
+        mode = None
+        if hasattr(self._player, "GetTransportFps"):
+            mode = self._player.GetTransportFps()
+
+        if FBTimeMode is not None and mode is not None:
+            if mode == FBTimeMode.kFBTimeModeCustom:
+                try:
+                    seconds = FBTime(0, 0, 0, 1).GetSecondDouble()
+                    return 1.0 / seconds if seconds > 0 else 30.0
+                except Exception:
+                    return 30.0
+
+            try:
+                seconds = FBTime(0, 0, 0, 1, 0, mode).GetSecondDouble()
+                return 1.0 / seconds if seconds > 0 else 30.0
+            except Exception:
+                return 30.0
+
+        return 30.0
+
+    def set_transport_fps(self, target_fps: float) -> None:
+        """Set the transport FPS to a custom value."""
+        if self._player is None:
+            return
+        if FBTimeMode is not None:
+            self._player.SetTransportFps(FBTimeMode.kFBTimeModeCustom, float(target_fps))
+        else:
+            self._player.SetTransportFps(float(target_fps))
+
+    def plot_animation_on_skeleton(self, target_fps: float) -> None:
+        """Plot animation to skeleton using plot options at target FPS."""
+        if FBPlotOptions is None or FBTime is None:
+            print("[SeamlessLoopTool] FBPlotOptions/FBTime not available; skipping plot")
+            return
+
+        plot_options = FBPlotOptions()
+        plot_options.PlotAllTakes = False
+        plot_options.PlotOnFrame = True
+        plot_options.UseConstantKeyReducer = False
+
+        if FBTimeMode is not None:
+            period = FBTime(0, 0, 0, 1, 0, FBTimeMode.kFBTimeModeCustom, float(target_fps))
+        else:
+            period = FBTime(0, 0, 0, 1)
+        plot_options.PlotPeriod = period
+
+        scene = self._system.Scene
+        character = None
+        if hasattr(scene, "Characters") and len(scene.Characters) > 0:
+            character = scene.Characters[0]
+
+        if character is not None and FBCharacterPlotWhere is not None:
+            character.PlotAnimation(FBCharacterPlotWhere.kFBCharacterPlotOnSkeleton, plot_options)
+            return
+
+        print("[SeamlessLoopTool] No character found for plotting; skipping plot")
+
+    def export_take_to_fbx(self, path: str, take_name: str) -> None:
+        """Export only the specified take to FBX."""
+        if FBApplication is None or FBFbxOptions is None or FBElementAction is None:
+            raise RuntimeError("FBX export requires MotionBuilder environment")
+
+        options = FBFbxOptions(False)
+        options.SetAll(FBElementAction.kFBElementActionDiscard, False)
+
+        take_count = options.GetTakeCount()
+        for i in range(take_count):
+            if options.GetTakeName(i) == take_name:
+                options.SetTakeSelect(i, True)
+                break
+
+        FBApplication().FileSave(path, options)
 
     def create_clean_take(self, suffix: str = "_InPlace", root_name: str = "Hips") -> str:
         """
