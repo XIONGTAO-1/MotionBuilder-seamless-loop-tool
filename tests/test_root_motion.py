@@ -219,6 +219,20 @@ class TestRootProcessor:
             err_msg="Last frame should equal first frame after linear offset"
         )
 
+    def test_snap_end_frame_to_target_fps(self):
+        """
+        snap_end_frame_to_fps should snap the end frame to the target FPS grid.
+        """
+        processor = RootProcessor()
+
+        end_idx = processor.snap_end_frame_to_fps(
+            num_frames=122,
+            source_fps=120.0,
+            target_fps=30.0,
+        )
+
+        assert end_idx == 120
+
     def test_align_orientation_offsets_rotation_y(self):
         """
         align_orientation should offset rotation Y so frame 0 equals target.

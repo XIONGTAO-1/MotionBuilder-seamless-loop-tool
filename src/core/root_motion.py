@@ -88,6 +88,20 @@ class RootProcessor:
         # Columns 3+ (rotations if present) are untouched
         return result
 
+    def snap_end_frame_to_fps(self, num_frames: int, source_fps: float, target_fps: float) -> int:
+        """
+        Snap the end frame to the nearest target FPS grid in source frame units.
+        """
+        if num_frames < 2 or source_fps <= 0.0 or target_fps <= 0.0:
+            return max(0, num_frames - 1)
+
+        duration_sec = (num_frames - 1) / source_fps
+        target_frames = int(round(duration_sec * target_fps)) + 1
+        snapped_duration = (target_frames - 1) / target_fps
+        snapped_end = int(round(snapped_duration * source_fps))
+
+        return max(1, min(num_frames - 1, snapped_end))
+
     def align_orientation(self, trajectory: np.ndarray, target_rot_y: Optional[float] = None) -> np.ndarray:
         """
         Align root orientation by offsetting rotation Y (Euler) by a constant amount.
