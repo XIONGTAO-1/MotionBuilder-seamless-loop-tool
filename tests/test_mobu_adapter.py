@@ -238,3 +238,47 @@ class TestMoBuAdapterSetRootTrajectory:
         tangent_calls = rotation_node.Nodes[0].FCurve.tangent_calls
         assert interp_calls
         assert tangent_calls
+
+    def test_plot_animation_uses_custom_time_mode_without_fps_arg(self, monkeypatch):
+        """plot_animation_on_skeleton should not pass an fps value to FBTime."""
+        calls = []
+
+        class FakeTime:
+            def __init__(self, *args):
+                calls.append(args)
+                if len(args) == 7:
+                    raise TypeError("FBTime received fps arg")
+
+        class FakePlotOptions:
+            def __init__(self):
+                self.PlotAllTakes = False
+                self.PlotOnFrame = False
+                self.UseConstantKeyReducer = False
+                self.PlotPeriod = None
+
+        class FakeScene:
+            Characters = []
+
+        class FakeSystem:
+            def __init__(self):
+                self.Scene = FakeScene()
+
+        class FakePlayer:
+            pass
+
+        class FakeTimeMode:
+            kFBTimeModeCustom = "custom"
+
+        monkeypatch.setattr(adapter_module, "IN_MOTIONBUILDER", True)
+        monkeypatch.setattr(adapter_module, "FBSystem", FakeSystem)
+        monkeypatch.setattr(adapter_module, "FBPlayerControl", FakePlayer)
+        monkeypatch.setattr(adapter_module, "FBTime", FakeTime)
+        monkeypatch.setattr(adapter_module, "FBPlotOptions", FakePlotOptions)
+        monkeypatch.setattr(adapter_module, "FBTimeMode", FakeTimeMode)
+        monkeypatch.setattr(adapter_module, "FBCharacterPlotWhere", None)
+
+        adapter = adapter_module.MoBuAdapter()
+        adapter.plot_animation_on_skeleton(60.0)
+
+        assert calls
+        assert len(calls[-1]) == 6

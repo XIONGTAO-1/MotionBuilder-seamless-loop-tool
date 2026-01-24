@@ -175,18 +175,10 @@ class SeamlessLoopToolWindow(QtBaseWidget):
         self.btn_process.clicked.connect(self._on_process_clicked)
         layout.addWidget(self.btn_process)
         
-        # Apply / Export Buttons
+        # Apply Button
         self.btn_apply = QtWidgets.QPushButton("3. Apply Changes to Scene")
         self.btn_apply.clicked.connect(self._on_apply_clicked)
-
-        self.btn_export = QtWidgets.QPushButton("4. Export FBX")
-        self.btn_export.clicked.connect(self._on_export_clicked)
-        self.btn_export.setEnabled(False)
-
-        apply_layout = QtWidgets.QHBoxLayout()
-        apply_layout.addWidget(self.btn_apply)
-        apply_layout.addWidget(self.btn_export)
-        layout.addLayout(apply_layout)
+        layout.addWidget(self.btn_apply)
         
         layout.addStretch()
         
@@ -351,7 +343,6 @@ class SeamlessLoopToolWindow(QtBaseWidget):
                 )
                 self.processed = True
                 self._set_status(f"Processed: {len(trajectory)} frames (root only)")
-            self.btn_export.setEnabled(self.processed)
         except Exception as e:
             self._set_status(f"Error: {e}")
             import traceback
@@ -370,48 +361,20 @@ class SeamlessLoopToolWindow(QtBaseWidget):
             if hasattr(self.service, 'apply_changes_hierarchy') and hasattr(self.service, 'processed_data') and self.service.processed_data:
                 self.service.apply_changes_hierarchy(
                     root_name=self.root_name,
-                    preserve_original=self.chk_preserve.isChecked()
+                    preserve_original=self.chk_preserve.isChecked(),
+                    target_fps=self._get_export_fps(),
                 )
                 self._set_status("Hierarchy applied to scene!")
             else:
                 # Fallback to root-only apply
                 self.service.apply_changes(
                     root_name=self.root_name,
-                    preserve_original=self.chk_preserve.isChecked()
+                    preserve_original=self.chk_preserve.isChecked(),
+                    target_fps=self._get_export_fps(),
                 )
                 self._set_status("Changes applied to scene (root only)!")
         except Exception as e:
             self._set_status(f"Error: {e}")
-
-    def _on_export_clicked(self):
-        """Handle Export button click - exports processed data to FBX."""
-        if not self.processed:
-            self._set_status("Please Process first!")
-            return
-        if not self._check_service():
-            return
-        self._get_params()
-
-        path, _ = QtWidgets.QFileDialog.getSaveFileName(
-            self,
-            "Export FBX",
-            "",
-            "FBX Files (*.fbx)"
-        )
-        if not path:
-            self._set_status("Export canceled")
-            return
-
-        target_fps = self._get_export_fps()
-        self._set_status(f"Exporting FBX at {target_fps} fps...")
-
-        try:
-            self.service.export_fbx(path, target_fps=target_fps, root_name=self.root_name)
-            self._set_status(f"Exported: {path}")
-        except Exception as e:
-            self._set_status(f"Error: {e}")
-            import traceback
-            traceback.print_exc()
 
 
 # Global reference to keep window alive

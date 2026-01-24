@@ -241,10 +241,57 @@ class TestLoopProcessorService:
         assert adapter.frame_range == (0, len(updated) - 1)
         assert adapter.animation_cleared is True
 
-    def test_export_requires_processed_data(self):
-        """export_fbx should require processed data."""
-        adapter = MockMoBuAdapter()
-        service = LoopProcessorService(adapter)
+    def test_apply_changes_sets_transport_fps_when_provided(self):
+        """apply_changes should set transport fps when target_fps is provided."""
+        class FakeAdapter:
+            def __init__(self):
+                self.transport_fps = None
+                self.cleared = False
+                self.written = False
 
-        with pytest.raises(RuntimeError):
-            service.export_fbx("/tmp/out.fbx", target_fps=60)
+            def clear_all_animation(self, root_name="Hips"):
+                self.cleared = True
+
+            def set_root_trajectory(self, root_name, trajectory, start_frame=0):
+                self.written = True
+
+            def set_transport_fps(self, target_fps):
+                self.transport_fps = target_fps
+
+        adapter = FakeAdapter()
+        service = LoopProcessorService(adapter)
+        service.processed_trajectory = np.zeros((10, 6))
+
+        service.apply_changes(preserve_original=False, target_fps=60.0)
+
+        assert adapter.transport_fps == 60.0
+        assert adapter.cleared is True
+        assert adapter.written is True
+
+    def test_apply_changes_hierarchy_sets_transport_fps_when_provided(self):
+        """apply_changes_hierarchy should set transport fps when target_fps is provided."""
+        class FakeAdapter:
+            def __init__(self):
+                self.transport_fps = None
+                self.cleared = False
+                self.written_nodes = []
+
+            def clear_all_animation(self, root_name="Hips"):
+                self.cleared = True
+
+            def set_node_trajectory(self, node_name, trajectory, start_frame=0):
+                self.written_nodes.append(node_name)
+
+            def set_transport_fps(self, target_fps):
+                self.transport_fps = target_fps
+
+        adapter = FakeAdapter()
+        service = LoopProcessorService(adapter)
+        service.processed_data = {"Hips": np.zeros((10, 6))}
+        service.processed_trajectory = np.zeros((10, 6))
+
+        service.apply_changes_hierarchy(preserve_original=False, target_fps=90.0)
+
+        assert adapter.transport_fps == 90.0
+        assert adapter.cleared is True
+        assert adapter.written_nodes == ["Hips"]

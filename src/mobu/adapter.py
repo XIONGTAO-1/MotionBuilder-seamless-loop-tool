@@ -180,7 +180,7 @@ class MoBuAdapter:
         plot_options.UseConstantKeyReducer = False
 
         if FBTimeMode is not None:
-            period = FBTime(0, 0, 0, 1, 0, FBTimeMode.kFBTimeModeCustom, float(target_fps))
+            period = FBTime(0, 0, 0, 1, 0, FBTimeMode.kFBTimeModeCustom)
         else:
             period = FBTime(0, 0, 0, 1)
         plot_options.PlotPeriod = period
