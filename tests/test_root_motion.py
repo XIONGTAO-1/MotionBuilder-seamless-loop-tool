@@ -233,6 +233,24 @@ class TestRootProcessor:
 
         assert end_idx == 120
 
+    def test_resample_trajectory_to_fps_preserves_endpoints(self):
+        processor = RootProcessor()
+
+        source_fps = 30.0
+        target_fps = 60.0
+        times = np.linspace(0.0, 1.0, 31)
+        trajectory = np.stack([times, times * 2.0], axis=1)
+
+        resampled = processor.resample_trajectory_to_fps(
+            trajectory,
+            source_fps=source_fps,
+            target_fps=target_fps,
+        )
+
+        assert resampled.shape[0] == 61
+        np.testing.assert_allclose(resampled[0], trajectory[0])
+        np.testing.assert_allclose(resampled[-1], trajectory[-1])
+
     def test_align_orientation_offsets_rotation_y(self):
         """
         align_orientation should offset rotation Y so frame 0 equals target.

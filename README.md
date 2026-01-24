@@ -45,6 +45,20 @@ To ensure data integrity:
 3. The processed, seamless data is **injected** starting at Frame 0.
 4. This ensures a clean, predictable asset every time.
 
+### 6. Orientation Alignment (Hips RotY)
+To ensure the character faces the correct direction in-game:
+- The tool calculates a delta: `Target Angle - Current Angle at Frame 0`.
+- This delta is added to **every frame** of the loop.
+- Example: If your mocap starts at 45° but you want 180° (facing back), the tool adds 135° to the entire animation.
+- This is a continuous offset, preventing any "pops" or wrapping issues.
+
+### 7. FPS Resampling
+If you export at a different frame rate (e.g., 60 FPS to 30 FPS):
+- The tool uses **Linear Interpolation** to resample position and rotation curves.
+- **Duration is Preserved**: The total time (in seconds) remains exactly the same.
+- **Density Changes**: Data points are reduced (downsampling) or increased (upsampling) to match the target grid.
+- This happens just before writing data to the scene, ensuring the final asset is clean.
+
 ---
 
 ##  Project Structure
@@ -60,7 +74,9 @@ seamless_loop_tool/
 │   │   ├── adapter.py       # Wrapper around pyfbsdk API
 │   │   └── loop_processor.py# Orchestrator connecting UI to Logic
 │   ├── ui/                  #  User Interface
+│   │   ├── export_fps.py    # FPS selection utilities
 │   │   └── tool_window.py   # PySide tool window definition
+│   ├── pipeline_io.py       # I/O utilities
 │   └── main.py              # Application bootstrap
 └── tests/                   #  Unit Tests (Pytest)
     ├── test_loop_analysis.py
@@ -129,6 +145,13 @@ pip install -r requirements.txt # (if provided) or just: pip install numpy pytes
   - **Critical for Walks**. Ensures the character is actually bobbing up and down.
   - Checks if `(MaxY - MinY) >= Threshold`.
   - *Default*: `7.0`. Increase this if the tool is picking "sliding" loops.
+- **Hips RotY Target**:
+  - Sets the starting Y-rotation (heading) of the Hips at frame 0.
+  - The entire animation is rotated to match this starting angle.
+  - *Default*: `180.0` (typically facing "back" or "forward" depending on convention).
+- **Export FPS**:
+  - Resamples the output animation to a specific frame rate (e.g., 30, 60).
+  - Useful for game engine export requirements.
 
 ### Step-by-Step Workflow
 1.  **Select your character's hips** in the scene.

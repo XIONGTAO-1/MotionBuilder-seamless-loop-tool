@@ -237,14 +237,25 @@ class LoopProcessorService:
         if self.processed_trajectory is None:
             raise RuntimeError("No processed trajectory. Call process_in_place first.")
 
+        trajectory = self.processed_trajectory
+        if target_fps is not None and hasattr(self.adapter, "get_current_fps"):
+            source_fps = self.adapter.get_current_fps()
+            trajectory = self.root_processor.resample_trajectory_to_fps(
+                trajectory,
+                source_fps=source_fps,
+                target_fps=target_fps,
+            )
+
         self._ensure_take_copy(root_name, preserve_original)
         if target_fps is not None and hasattr(self.adapter, "set_transport_fps"):
             self.adapter.set_transport_fps(target_fps)
         self.adapter.set_root_trajectory(
             root_name,
-            self.processed_trajectory,
+            trajectory,
             start_frame=0
         )
+        if hasattr(self.adapter, "_set_take_time_span"):
+            self.adapter._set_take_time_span(0, len(trajectory) - 1)
 
     def apply_changes_hierarchy(
         self, 
@@ -265,13 +276,26 @@ class LoopProcessorService:
         if not hasattr(self, 'processed_data') or not self.processed_data:
             raise RuntimeError("No processed data. Call create_seamless_loop_hierarchy first.")
 
+        source_fps = None
+        if target_fps is not None and hasattr(self.adapter, "get_current_fps"):
+            source_fps = self.adapter.get_current_fps()
+
         self._ensure_take_copy(root_name, preserve_original)
         if target_fps is not None and hasattr(self.adapter, "set_transport_fps"):
             self.adapter.set_transport_fps(target_fps)
         
         bone_count = 0
+        resampled_root = None
         for bone_name, trajectory in self.processed_data.items():
             try:
+                if target_fps is not None and source_fps is not None:
+                    trajectory = self.root_processor.resample_trajectory_to_fps(
+                        trajectory,
+                        source_fps=source_fps,
+                        target_fps=target_fps,
+                    )
+                if bone_name == root_name:
+                    resampled_root = trajectory
                 if hasattr(self.adapter, 'set_node_trajectory'):
                     self.adapter.set_node_trajectory(bone_name, trajectory, start_frame=0)
                 else:
@@ -281,8 +305,9 @@ class LoopProcessorService:
                 print(f"[SeamlessLoopTool] Warning: Failed to write bone '{bone_name}': {e}")
         
         # Set final time span
-        if self.processed_trajectory is not None:
-            num_frames = len(self.processed_trajectory)
+        span_source = resampled_root if resampled_root is not None else self.processed_trajectory
+        if span_source is not None:
+            num_frames = len(span_source)
             if hasattr(self.adapter, '_set_take_time_span'):
                 self.adapter._set_take_time_span(0, num_frames - 1)
         

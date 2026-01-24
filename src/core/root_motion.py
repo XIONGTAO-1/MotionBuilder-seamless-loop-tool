@@ -102,6 +102,37 @@ class RootProcessor:
 
         return max(1, min(num_frames - 1, snapped_end))
 
+    def resample_trajectory_to_fps(
+        self,
+        trajectory: np.ndarray,
+        source_fps: float,
+        target_fps: float,
+    ) -> np.ndarray:
+        """
+        Resample trajectory to target FPS while preserving duration in seconds.
+        """
+        if (
+            trajectory is None
+            or len(trajectory) < 2
+            or source_fps <= 0.0
+            or target_fps <= 0.0
+            or source_fps == target_fps
+        ):
+            return trajectory.copy()
+
+        num_frames = len(trajectory)
+        duration_sec = (num_frames - 1) / source_fps
+        target_frames = int(round(duration_sec * target_fps)) + 1
+        if target_frames < 2:
+            return trajectory[:1].copy()
+
+        source_times = np.linspace(0.0, duration_sec, num_frames)
+        target_times = np.linspace(0.0, duration_sec, target_frames)
+        resampled = np.zeros((target_frames, trajectory.shape[1]))
+        for col in range(trajectory.shape[1]):
+            resampled[:, col] = np.interp(target_times, source_times, trajectory[:, col])
+        return resampled
+
     def align_orientation(self, trajectory: np.ndarray, target_rot_y: Optional[float] = None) -> np.ndarray:
         """
         Align root orientation by offsetting rotation Y (Euler) by a constant amount.

@@ -241,6 +241,29 @@ class TestLoopProcessorService:
         assert adapter.frame_range == (0, len(updated) - 1)
         assert adapter.animation_cleared is True
 
+    def test_apply_changes_resamples_when_target_fps_differs(self):
+        """apply_changes should resample trajectory to target fps."""
+        class FakeAdapter:
+            def __init__(self):
+                self.last_length = None
+
+            def clear_all_animation(self, root_name="Hips"):
+                pass
+
+            def get_current_fps(self):
+                return 30.0
+
+            def set_root_trajectory(self, root_name, trajectory, start_frame=0):
+                self.last_length = len(trajectory)
+
+        adapter = FakeAdapter()
+        service = LoopProcessorService(adapter)
+        service.processed_trajectory = np.zeros((31, 6))
+
+        service.apply_changes(preserve_original=False, target_fps=60.0)
+
+        assert adapter.last_length == 61
+
     def test_apply_changes_sets_transport_fps_when_provided(self):
         """apply_changes should set transport fps when target_fps is provided."""
         class FakeAdapter:
@@ -267,6 +290,33 @@ class TestLoopProcessorService:
         assert adapter.transport_fps == 60.0
         assert adapter.cleared is True
         assert adapter.written is True
+
+    def test_apply_changes_hierarchy_resamples_when_target_fps_differs(self):
+        """apply_changes_hierarchy should resample trajectories to target fps."""
+        class FakeAdapter:
+            def __init__(self):
+                self.lengths = {}
+
+            def clear_all_animation(self, root_name="Hips"):
+                pass
+
+            def get_current_fps(self):
+                return 30.0
+
+            def set_node_trajectory(self, node_name, trajectory, start_frame=0):
+                self.lengths[node_name] = len(trajectory)
+
+        adapter = FakeAdapter()
+        service = LoopProcessorService(adapter)
+        service.processed_data = {
+            "Hips": np.zeros((31, 6)),
+            "Spine": np.zeros((31, 6)),
+        }
+        service.processed_trajectory = np.zeros((31, 6))
+
+        service.apply_changes_hierarchy(preserve_original=False, target_fps=60.0)
+
+        assert adapter.lengths == {"Hips": 61, "Spine": 61}
 
     def test_apply_changes_hierarchy_sets_transport_fps_when_provided(self):
         """apply_changes_hierarchy should set transport fps when target_fps is provided."""
