@@ -345,3 +345,60 @@ class TestLoopProcessorService:
         assert adapter.transport_fps == 90.0
         assert adapter.cleared is True
         assert adapter.written_nodes == ["Hips"]
+
+    def test_detect_contact_intervals(self):
+        service = LoopProcessorService(MockMoBuAdapter())
+        heights = [5, 2, 1, 0.5, 2, 5]
+        speeds = [2, 0.4, 0.3, 0.2, 0.4, 2]
+
+        contacts = service.detect_contact_intervals(
+            heights,
+            speeds,
+            height_threshold=2.0,
+            speed_threshold=0.5,
+            min_span=2,
+        )
+
+        assert contacts == [(1, 4)]
+
+    def test_apply_stance_correction(self):
+        adapter = MockMoBuAdapter()
+        service = LoopProcessorService(adapter)
+        take = "Take 001"
+        node = "LeftFoot"
+        frames = list(range(5))
+        translations = [(0, 1.0, 0)] * 5
+
+        adapter.set_mock_trajectory(take, node, frames, translations, [])
+        contacts = [(1, 3)]
+        service.apply_stance_correction(take, node, contacts, ground_height=0.0)
+
+        updated_frames, updated_translations, _ = adapter.get_mock_trajectory(take, node)
+        assert updated_frames == frames
+        assert updated_translations[1:4] == [(0, 0.0, 0)] * 3
+
+    def test_apply_foot_contact_fix_world_space(self):
+        adapter = MockMoBuAdapter()
+        service = LoopProcessorService(adapter)
+        take = "Take 001"
+        foot = "LeftFoot"
+        toe = "LeftToeBase"
+        frames = [0, 1, 2, 3, 4]
+        local_translations = [(0, 2.5, 0)] * 5
+
+        adapter.set_mock_trajectory(take, foot, frames, local_translations, [])
+        adapter.set_mock_world_positions(take, foot, [(0, 0.5, 0)] * 5)
+        adapter.set_mock_world_positions(take, toe, [(0, 0.6, 0)] * 5)
+
+        service.apply_foot_contact_fix(
+            take,
+            foot,
+            toe,
+            ground_height=0.0,
+            height_threshold=2.0,
+            speed_threshold=0.5,
+            min_span=3,
+        )
+
+        _, updated_translations, _ = adapter.get_mock_trajectory(take, foot)
+        assert updated_translations[0:5] == [(0, 0.0, 0)] * 5

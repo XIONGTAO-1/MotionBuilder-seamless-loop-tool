@@ -6,7 +6,7 @@ the MoBu adapter with the core algorithms.
 """
 
 import numpy as np
-from typing import Tuple, Optional
+from typing import Tuple, Optional, List
 
 from core.loop_analysis import FrameAnalyzer
 from core.root_motion import RootProcessor
@@ -262,6 +262,14 @@ class LoopProcessorService:
         root_name: str = "Hips", 
         preserve_original: bool = True,
         target_fps: Optional[float] = None,
+        left_foot: Optional[str] = None,
+        right_foot: Optional[str] = None,
+        left_toe: Optional[str] = None,
+        right_toe: Optional[str] = None,
+        ground_height: float = 0.0,
+        contact_height_threshold: float = 2.0,
+        contact_speed_threshold: float = 0.5,
+        contact_min_span: int = 3,
     ) -> None:
         """
         Write all processed bone data back to MotionBuilder.
@@ -272,6 +280,12 @@ class LoopProcessorService:
         Args:
             root_name: Name of root bone (used for take creation)
             preserve_original: If True, create a clean take before injecting
+            left_foot/right_foot: Foot bone names for contact correction
+            left_toe/right_toe: Toe bone names for contact correction
+            ground_height: Ground plane height (default 0.0)
+            contact_height_threshold: Max height to consider contact
+            contact_speed_threshold: Max speed to consider contact
+            contact_min_span: Minimum frame span for contact
         """
         if not hasattr(self, 'processed_data') or not self.processed_data:
             raise RuntimeError("No processed data. Call create_seamless_loop_hierarchy first.")
@@ -310,8 +324,178 @@ class LoopProcessorService:
             num_frames = len(span_source)
             if hasattr(self.adapter, '_set_take_time_span'):
                 self.adapter._set_take_time_span(0, num_frames - 1)
+
+        take_name = None
+        if hasattr(self.adapter, "get_current_take_name"):
+            try:
+                take_name = self.adapter.get_current_take_name()
+            except Exception:
+                take_name = None
+
+        for foot_name, toe_name in ((left_foot, left_toe), (right_foot, right_toe)):
+            if foot_name:
+                self.apply_foot_contact_fix(
+                    take_name or "",
+                    foot_name,
+                    toe_name,
+                    ground_height=ground_height,
+                    height_threshold=contact_height_threshold,
+                    speed_threshold=contact_speed_threshold,
+                    min_span=contact_min_span,
+                )
         
         print(f"[SeamlessLoopTool] Wrote {bone_count} bones to new Take")
+
+    def detect_contact_intervals(
+        self,
+        heights: List[float],
+        speeds: List[float],
+        height_threshold: float = 2.0,
+        speed_threshold: float = 0.5,
+        min_span: int = 3,
+    ) -> List[Tuple[int, int]]:
+        if len(heights) != len(speeds):
+            raise ValueError("Heights and speeds length mismatch")
+
+        contact_mask = [
+            (height <= height_threshold) and (speed <= speed_threshold)
+            for height, speed in zip(heights, speeds)
+        ]
+        return self._extract_intervals(contact_mask, min_span)
+
+    def apply_stance_correction(
+        self,
+        take_name: str,
+        node_name: str,
+        contact_intervals: List[Tuple[int, int]],
+        ground_height: float = 0.0,
+    ) -> None:
+        if not contact_intervals:
+            return
+
+        start_frame, end_frame = self.adapter.get_frame_range()
+
+        if hasattr(self.adapter, "get_node_trajectory"):
+            trajectory = self.adapter.get_node_trajectory(
+                node_name, start_frame=start_frame, end_frame=end_frame
+            )
+        else:
+            trajectory = self.adapter.get_root_trajectory(node_name)
+
+        corrected = trajectory.copy()
+        up_axis = self.root_processor.up_axis
+
+        for start, end in contact_intervals:
+            corrected[start : end + 1, up_axis] = ground_height
+
+        if hasattr(self.adapter, "set_node_trajectory"):
+            self.adapter.set_node_trajectory(node_name, corrected, start_frame=start_frame)
+        else:
+            self.adapter.set_root_trajectory(node_name, corrected, start_frame=start_frame)
+
+    def apply_foot_contact_fix(
+        self,
+        take_name: str,
+        foot_name: str,
+        toe_name: Optional[str] = None,
+        ground_height: float = 0.0,
+        height_threshold: float = 2.0,
+        speed_threshold: float = 0.5,
+        min_span: int = 3,
+    ) -> List[Tuple[int, int]]:
+        start_frame, end_frame = self.adapter.get_frame_range()
+        foot_positions = self._get_world_positions(foot_name, start_frame, end_frame)
+
+        if foot_positions.size == 0:
+            return []
+
+        toe_positions = None
+        if toe_name:
+            toe_positions = self._get_world_positions(toe_name, start_frame, end_frame)
+
+        up_axis = self.root_processor.up_axis
+        heights = []
+        for idx, foot_pos in enumerate(foot_positions):
+            foot_height = foot_pos[up_axis]
+            if toe_positions is not None and idx < len(toe_positions):
+                toe_height = toe_positions[idx][up_axis]
+                height = min(foot_height, toe_height)
+            else:
+                height = foot_height
+            heights.append(height - ground_height)
+
+        speeds = self._compute_speeds(foot_positions)
+        contacts = self.detect_contact_intervals(
+            heights,
+            speeds,
+            height_threshold=height_threshold,
+            speed_threshold=speed_threshold,
+            min_span=min_span,
+        )
+
+        self.apply_stance_correction(
+            take_name, foot_name, contacts, ground_height=ground_height
+        )
+        if toe_name:
+            self.apply_stance_correction(
+                take_name, toe_name, contacts, ground_height=ground_height
+            )
+
+        return contacts
+
+    def _get_world_positions(
+        self, node_name: str, start_frame: int, end_frame: int
+    ) -> np.ndarray:
+        if not node_name:
+            return np.array([], dtype=float)
+
+        if hasattr(self.adapter, "get_world_translations"):
+            try:
+                positions = self.adapter.get_world_translations(
+                    node_name, start_frame=start_frame, end_frame=end_frame
+                )
+            except TypeError:
+                positions = self.adapter.get_world_translations(node_name)
+        elif hasattr(self.adapter, "get_node_trajectory"):
+            positions = self.adapter.get_node_trajectory(
+                node_name, start_frame=start_frame, end_frame=end_frame
+            )[:, :3]
+        else:
+            positions = self.adapter.get_root_trajectory(node_name)[:, :3]
+
+        return np.array(positions, dtype=float)
+
+    @staticmethod
+    def _compute_speeds(positions: np.ndarray) -> List[float]:
+        if len(positions) == 0:
+            return []
+
+        speeds = [0.0]
+        for idx in range(1, len(positions)):
+            delta = positions[idx] - positions[idx - 1]
+            speeds.append(float(np.linalg.norm(delta)))
+        return speeds
+
+    @staticmethod
+    def _extract_intervals(
+        contact_mask: List[bool], min_span: int
+    ) -> List[Tuple[int, int]]:
+        intervals = []
+        start = None
+        for idx, is_contact in enumerate(contact_mask):
+            if is_contact and start is None:
+                start = idx
+                continue
+            if not is_contact and start is not None:
+                end = idx - 1
+                if (end - start + 1) >= min_span:
+                    intervals.append((start, end))
+                start = None
+        if start is not None:
+            end = len(contact_mask) - 1
+            if (end - start + 1) >= min_span:
+                intervals.append((start, end))
+        return intervals
 
     def create_seamless_loop(
         self,

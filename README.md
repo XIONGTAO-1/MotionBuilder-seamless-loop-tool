@@ -45,14 +45,19 @@ To ensure data integrity:
 3. The processed, seamless data is **injected** starting at Frame 0.
 4. This ensures a clean, predictable asset every time.
 
-### 6. Orientation Alignment (Hips RotY)
+### 6. Foot Contact Correction (FK In-Place)
+For in-place FK data, a post-apply pass samples foot/toe world height and speed to detect stance phases:
+- Contacts are detected when **height ≤ 2.0** and **speed ≤ 0.5** for at least **3 frames**.
+- During stance, local foot/toe Y curves are clamped to the ground height (default `0.0`).
+
+### 7. Orientation Alignment (Hips RotY)
 To ensure the character faces the correct direction in-game:
 - The tool calculates a delta: `Target Angle - Current Angle at Frame 0`.
 - This delta is added to **every frame** of the loop.
 - Example: If your mocap starts at 45° but you want 180° (facing back), the tool adds 135° to the entire animation.
 - This is a continuous offset, preventing any "pops" or wrapping issues.
 
-### 7. FPS Resampling
+### 8. FPS Resampling
 If you export at a different frame rate (e.g., 60 FPS to 30 FPS):
 - The tool uses **Linear Interpolation** to resample position and rotation curves.
 - **Duration is Preserved**: The total time (in seconds) remains exactly the same.
@@ -127,6 +132,8 @@ pip install -r requirements.txt # (if provided) or just: pip install numpy pytes
 
 #### Basic Settings
 - **Root Bone**: The name of your character's hip bone (e.g., `Hips`, `Reference`). Click "Get Selected" to auto-fill.
+- **Left Foot / Right Foot**: Foot bone names used for contact detection (e.g., `LeftFoot`, `RightFoot`).
+- **Left Toe / Right Toe**: Toe bone names used for contact detection (e.g., `LeftToeBase`, `RightToeBase`).
 - **Blend Frames**: Number of frames to blend the end into the start.
   - *Recommendation*: `5-10` frames for typical walk cycles.
 - **Create New Take**: Always recommended. Keeps your original take safe.
@@ -138,9 +145,6 @@ pip install -r requirements.txt # (if provided) or just: pip install numpy pytes
 - **Max Cycle Frames**: 
   - Upper limit for loop search.
   - *Default*: `60`.
-- **Min Avg Velocity**: 
-  - Ignores static/idle segments.
-  - *Default*: `5.0`.
 - **Min Vertical Bounce**:
   - **Critical for Walks**. Ensures the character is actually bobbing up and down.
   - Checks if `(MaxY - MinY) >= Threshold`.

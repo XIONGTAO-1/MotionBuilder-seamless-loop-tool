@@ -511,6 +511,50 @@ class MoBuAdapter:
         
         return trajectory
 
+    def get_world_translations(
+        self,
+        node_name: str,
+        start_frame: Optional[int] = None,
+        end_frame: Optional[int] = None,
+    ) -> np.ndarray:
+        """
+        Sample world-space translations for a node over a frame range.
+        """
+        model = self.find_root_bone(node_name)
+        if model is None:
+            raise ValueError(f"Bone '{node_name}' not found")
+
+        if start_frame is None or end_frame is None:
+            anim_start, anim_end = self.get_frame_range()
+            start_frame = start_frame if start_frame is not None else anim_start
+            end_frame = end_frame if end_frame is not None else anim_end
+
+        num_frames = end_frame - start_frame + 1
+        positions = np.zeros((num_frames, 3))
+
+        for i, frame in enumerate(range(start_frame, end_frame + 1)):
+            time = FBTime(0, 0, 0, frame)
+
+            if FBMatrix is not None and FBModelTransformationType is not None:
+                fb_matrix = FBMatrix()
+                model.GetMatrix(
+                    fb_matrix,
+                    FBModelTransformationType.kModelTransformation_Transformation,
+                    True,
+                    time,
+                )
+                positions[i, 0] = fb_matrix[0][3]
+                positions[i, 1] = fb_matrix[1][3]
+                positions[i, 2] = fb_matrix[2][3]
+            else:
+                translation = model.Translation.GetAnimationNode()
+                if translation and hasattr(translation, "Nodes") and len(translation.Nodes) >= 3:
+                    positions[i, 0] = translation.Nodes[0].FCurve.Evaluate(time)
+                    positions[i, 1] = translation.Nodes[1].FCurve.Evaluate(time)
+                    positions[i, 2] = translation.Nodes[2].FCurve.Evaluate(time)
+
+        return positions
+
     def set_node_trajectory(
         self,
         node_name: str,
@@ -983,6 +1027,8 @@ class MockMoBuAdapter:
         self._current_take_name = "Take1"
         self._last_written_frames = []
         self._animation_cleared = False
+        self._mock_frames = {}
+        self._world_positions = {}
 
     @property
     def frame_range(self) -> Tuple[int, int]:
@@ -1089,3 +1135,80 @@ class MockMoBuAdapter:
         if not hasattr(self, '_bone_data'):
             self._bone_data = {}
         self._bone_data[bone_name] = trajectory.copy()
+
+    def set_mock_trajectory(
+        self,
+        take_name: str,
+        node_name: str,
+        frames: list,
+        translations: list,
+        rotations: list,
+    ) -> None:
+        """Set mock trajectory data using explicit frames."""
+        if not hasattr(self, "_bone_data"):
+            self._bone_data = {}
+
+        num_frames = len(frames)
+        trajectory = np.zeros((num_frames, 6))
+
+        for i, translation in enumerate(translations):
+            trajectory[i, 0] = translation[0]
+            trajectory[i, 1] = translation[1]
+            trajectory[i, 2] = translation[2]
+
+        if rotations:
+            for i, rotation in enumerate(rotations):
+                trajectory[i, 3] = rotation[0]
+                trajectory[i, 4] = rotation[1]
+                trajectory[i, 5] = rotation[2]
+
+        self._bone_data[node_name] = trajectory.copy()
+        self._mock_frames[(take_name, node_name)] = list(frames)
+        if frames:
+            self._frame_range = (frames[0], frames[-1])
+
+    def get_mock_trajectory(self, take_name: str, node_name: str) -> tuple:
+        """Return mock trajectory data for tests."""
+        frames = self._mock_frames.get((take_name, node_name))
+        trajectory = None
+        if hasattr(self, "_bone_data"):
+            trajectory = self._bone_data.get(node_name)
+
+        if trajectory is None:
+            trajectory = self._trajectory.copy()
+
+        if frames is None:
+            frames = list(range(len(trajectory)))
+
+        translations = [(row[0], row[1], row[2]) for row in trajectory]
+        rotations = [(row[3], row[4], row[5]) for row in trajectory]
+        return frames, translations, rotations
+
+    def set_mock_world_positions(self, take_name: str, node_name: str, positions: list) -> None:
+        """Set mock world-space positions for a node."""
+        self._world_positions[(take_name, node_name)] = list(positions)
+        self._world_positions[node_name] = list(positions)
+
+    def get_world_translations(
+        self,
+        node_name: str,
+        start_frame: Optional[int] = None,
+        end_frame: Optional[int] = None,
+    ) -> np.ndarray:
+        """Return mock world-space translations for a node."""
+        positions = self._world_positions.get(node_name)
+        if positions is None:
+            positions = []
+            if hasattr(self, "_bone_data") and node_name in self._bone_data:
+                for row in self._bone_data[node_name]:
+                    positions.append((row[0], row[1], row[2]))
+            else:
+                for row in self._trajectory:
+                    positions.append((row[0], row[1], row[2]))
+
+        if start_frame is not None or end_frame is not None:
+            start_frame = start_frame or 0
+            end_frame = end_frame if end_frame is not None else len(positions) - 1
+            positions = positions[start_frame : end_frame + 1]
+
+        return np.array(positions, dtype=float)

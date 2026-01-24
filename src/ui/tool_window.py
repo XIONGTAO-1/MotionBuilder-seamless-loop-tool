@@ -58,6 +58,10 @@ class SeamlessLoopToolWindow(QtBaseWidget):
         
         # State
         self.root_name = "Hips"
+        self.left_foot_name = "LeftFoot"
+        self.right_foot_name = "RightFoot"
+        self.left_toe_name = "LeftToeBase"
+        self.right_toe_name = "RightToeBase"
         self.blend_frames = 5
         self.target_rot_y = 180.0
         self.loop_frame = None
@@ -91,6 +95,44 @@ class SeamlessLoopToolWindow(QtBaseWidget):
         self.btn_get_selected.clicked.connect(self._on_get_selected_clicked)
         root_layout.addWidget(self.btn_get_selected)
         layout.addLayout(root_layout)
+
+        # Foot/Toe Bone Inputs
+        self.edit_left_foot = QtWidgets.QLineEdit(self.left_foot_name)
+        self.edit_right_foot = QtWidgets.QLineEdit(self.right_foot_name)
+        self.edit_left_toe = QtWidgets.QLineEdit(self.left_toe_name)
+        self.edit_right_toe = QtWidgets.QLineEdit(self.right_toe_name)
+
+        left_foot_layout = QtWidgets.QHBoxLayout()
+        left_foot_layout.addWidget(QLabel("Left Foot:"))
+        left_foot_layout.addWidget(self.edit_left_foot)
+        btn_left_foot = QtWidgets.QPushButton("← Get Selected")
+        btn_left_foot.clicked.connect(lambda: self._set_selected_to_edit(self.edit_left_foot, "Left Foot"))
+        left_foot_layout.addWidget(btn_left_foot)
+        layout.addLayout(left_foot_layout)
+
+        right_foot_layout = QtWidgets.QHBoxLayout()
+        right_foot_layout.addWidget(QLabel("Right Foot:"))
+        right_foot_layout.addWidget(self.edit_right_foot)
+        btn_right_foot = QtWidgets.QPushButton("← Get Selected")
+        btn_right_foot.clicked.connect(lambda: self._set_selected_to_edit(self.edit_right_foot, "Right Foot"))
+        right_foot_layout.addWidget(btn_right_foot)
+        layout.addLayout(right_foot_layout)
+
+        left_toe_layout = QtWidgets.QHBoxLayout()
+        left_toe_layout.addWidget(QLabel("Left Toe:"))
+        left_toe_layout.addWidget(self.edit_left_toe)
+        btn_left_toe = QtWidgets.QPushButton("← Get Selected")
+        btn_left_toe.clicked.connect(lambda: self._set_selected_to_edit(self.edit_left_toe, "Left Toe"))
+        left_toe_layout.addWidget(btn_left_toe)
+        layout.addLayout(left_toe_layout)
+
+        right_toe_layout = QtWidgets.QHBoxLayout()
+        right_toe_layout.addWidget(QLabel("Right Toe:"))
+        right_toe_layout.addWidget(self.edit_right_toe)
+        btn_right_toe = QtWidgets.QPushButton("← Get Selected")
+        btn_right_toe.clicked.connect(lambda: self._set_selected_to_edit(self.edit_right_toe, "Right Toe"))
+        right_toe_layout.addWidget(btn_right_toe)
+        layout.addLayout(right_toe_layout)
         
         # Blend Frames Input
         blend_layout = QtWidgets.QHBoxLayout()
@@ -130,11 +172,6 @@ class SeamlessLoopToolWindow(QtBaseWidget):
         self.spin_max_cycle_frames.setRange(10, 200)
         self.spin_max_cycle_frames.setValue(60)
 
-        self.spin_min_avg_velocity = QDoubleSpinBox()
-        self.spin_min_avg_velocity.setRange(0.0, 1000.0)
-        self.spin_min_avg_velocity.setSingleStep(1.0)
-        self.spin_min_avg_velocity.setValue(5.0)
-
         self.spin_min_vertical_bounce = QDoubleSpinBox()
         self.spin_min_vertical_bounce.setRange(0.0, 100.0)
         self.spin_min_vertical_bounce.setSingleStep(0.1)
@@ -155,7 +192,6 @@ class SeamlessLoopToolWindow(QtBaseWidget):
 
         advanced_layout.addRow(QLabel("Min Cycle Frames"), self.spin_min_cycle_frames)
         advanced_layout.addRow(QLabel("Max Cycle Frames"), self.spin_max_cycle_frames)
-        advanced_layout.addRow(QLabel("Min Avg Velocity"), self.spin_min_avg_velocity)
         advanced_layout.addRow(QLabel("Min Vertical Bounce"), self.spin_min_vertical_bounce)
         advanced_layout.addRow(QLabel("Hips RotY Target"), self.spin_target_rot_y)
         advanced_layout.addRow(QLabel("Export FPS"), self.combo_export_fps)
@@ -230,6 +266,10 @@ class SeamlessLoopToolWindow(QtBaseWidget):
     def _get_params(self):
         """Read current parameters from UI."""
         self.root_name = self.edit_root.text().strip() or "Hips"
+        self.left_foot_name = self.edit_left_foot.text().strip() or "LeftFoot"
+        self.right_foot_name = self.edit_right_foot.text().strip() or "RightFoot"
+        self.left_toe_name = self.edit_left_toe.text().strip() or "LeftToeBase"
+        self.right_toe_name = self.edit_right_toe.text().strip() or "RightToeBase"
         self.blend_frames = self.edit_blend.value()
         self.target_rot_y = self.spin_target_rot_y.value()
 
@@ -249,19 +289,23 @@ class SeamlessLoopToolWindow(QtBaseWidget):
             return False
         return True
     
-    def _on_get_selected_clicked(self):
-        """Get selected bone from Navigator and fill in Root Bone field."""
+    def _set_selected_to_edit(self, edit_field, label: str):
+        """Get selected bone from Navigator and fill in a field."""
         if not self._check_service():
             return
         try:
             selected_name = self.service.adapter.get_selected_model_name()
             if selected_name:
-                self.edit_root.setText(selected_name)
-                self._set_status(f"Selected: {selected_name}")
+                edit_field.setText(selected_name)
+                self._set_status(f"{label} set to: {selected_name}")
             else:
                 self._set_status("No model selected in Navigator")
         except Exception as e:
             self._set_status(f"Error: {e}")
+
+    def _on_get_selected_clicked(self):
+        """Get selected bone from Navigator and fill in Root Bone field."""
+        self._set_selected_to_edit(self.edit_root, "Root Bone")
     
     def _on_analyze_clicked(self):
         """Handle Analyze button click - uses cycle detection to find mid-animation loop."""
@@ -278,14 +322,12 @@ class SeamlessLoopToolWindow(QtBaseWidget):
             # Use find_walk_cycle to detect a cycle segment (not starting from frame 0)
             min_cycle_frames = self.spin_min_cycle_frames.value()
             max_cycle_frames = self.spin_max_cycle_frames.value()
-            min_avg_velocity = self.spin_min_avg_velocity.value()
             min_vertical_bounce = self.spin_min_vertical_bounce.value()
 
             self.cycle_start, self.cycle_end = self.service.find_walk_cycle(
                 root_name=self.root_name,
                 min_cycle_frames=min_cycle_frames,
                 max_cycle_frames=max_cycle_frames,
-                min_average_velocity=min_avg_velocity,
                 min_vertical_bounce=min_vertical_bounce
             )
             self.start_frame = self.cycle_start
@@ -353,7 +395,7 @@ class SeamlessLoopToolWindow(QtBaseWidget):
         if not self.processed:
             self._set_status("Please Process first!")
             return
-        
+        self._get_params()
         self._set_status("Applying changes to hierarchy...")
         
         try:
@@ -363,6 +405,11 @@ class SeamlessLoopToolWindow(QtBaseWidget):
                     root_name=self.root_name,
                     preserve_original=self.chk_preserve.isChecked(),
                     target_fps=self._get_export_fps(),
+                    left_foot=self.left_foot_name,
+                    right_foot=self.right_foot_name,
+                    left_toe=self.left_toe_name,
+                    right_toe=self.right_toe_name,
+                    ground_height=0.0,
                 )
                 self._set_status("Hierarchy applied to scene!")
             else:
