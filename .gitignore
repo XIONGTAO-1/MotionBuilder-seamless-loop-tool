@@ -11,3 +11,8 @@ wheels/
 
 # Documentation plans
 docs/plans/
+
+# Planning artifacts
+findings.md
+progress.md
+task_plan.md

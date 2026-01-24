@@ -167,6 +167,44 @@ class TestLoopProcessorService:
 
         assert service.loop_start_frame == 130
 
+    def test_create_seamless_loop_does_not_align_orientation_by_default(self, monkeypatch):
+        """create_seamless_loop should not change root rotation Y unless requested."""
+        trajectory = np.zeros((3, 6))
+        trajectory[:, 4] = [90.0, 100.0, 110.0]
+        adapter = MockMoBuAdapter(mock_trajectory=trajectory, mock_frame_range=(0, 2))
+        service = LoopProcessorService(adapter)
+
+        monkeypatch.setattr(service.root_processor, "blend_loop_ends", lambda data, blend_frames=5: data)
+
+        result = service.create_seamless_loop(
+            start_frame=0,
+            loop_frame=2,
+            in_place=False,
+            use_cycle_detection=False,
+        )
+
+        np.testing.assert_array_equal(result[:, 4], trajectory[:, 4])
+
+    def test_create_seamless_loop_aligns_root_orientation_y_when_requested(self, monkeypatch):
+        """create_seamless_loop should align root rotation Y when target is provided."""
+        trajectory = np.zeros((3, 6))
+        trajectory[:, 4] = [90.0, 100.0, 110.0]
+        adapter = MockMoBuAdapter(mock_trajectory=trajectory, mock_frame_range=(0, 2))
+        service = LoopProcessorService(adapter)
+
+        monkeypatch.setattr(service.root_processor, "blend_loop_ends", lambda data, blend_frames=5: data)
+
+        result = service.create_seamless_loop(
+            start_frame=0,
+            loop_frame=2,
+            in_place=False,
+            use_cycle_detection=False,
+            target_rot_y=180.0,
+        )
+
+        assert result[0, 4] == 180.0
+        np.testing.assert_array_equal(result[:, 4], trajectory[:, 4] + 90.0)
+
     def test_mock_create_clean_take_clears_animation(self):
         """create_clean_take should clear animation data in the mock adapter."""
         adapter = MockMoBuAdapter()

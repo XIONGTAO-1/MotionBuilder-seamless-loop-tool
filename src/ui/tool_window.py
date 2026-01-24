@@ -50,6 +50,7 @@ class SeamlessLoopToolWindow(QtWidgets.QWidget):
         # State
         self.root_name = "Hips"
         self.blend_frames = 5
+        self.target_rot_y = 180.0
         self.loop_frame = None
         self.processed = False
         
@@ -130,10 +131,16 @@ class SeamlessLoopToolWindow(QtWidgets.QWidget):
         self.spin_min_vertical_bounce.setSingleStep(0.1)
         self.spin_min_vertical_bounce.setValue(0.0)
 
+        self.spin_target_rot_y = QDoubleSpinBox()
+        self.spin_target_rot_y.setRange(-360.0, 360.0)
+        self.spin_target_rot_y.setSingleStep(1.0)
+        self.spin_target_rot_y.setValue(self.target_rot_y)
+
         advanced_layout.addRow(QLabel("Min Cycle Frames"), self.spin_min_cycle_frames)
         advanced_layout.addRow(QLabel("Max Cycle Frames"), self.spin_max_cycle_frames)
         advanced_layout.addRow(QLabel("Min Avg Velocity"), self.spin_min_avg_velocity)
         advanced_layout.addRow(QLabel("Min Vertical Bounce"), self.spin_min_vertical_bounce)
+        advanced_layout.addRow(QLabel("Hips RotY Target"), self.spin_target_rot_y)
         layout.addWidget(advanced_group)
         
         # Analyze Button
@@ -206,6 +213,7 @@ class SeamlessLoopToolWindow(QtWidgets.QWidget):
         """Read current parameters from UI."""
         self.root_name = self.edit_root.text().strip() or "Hips"
         self.blend_frames = self.edit_blend.value()
+        self.target_rot_y = self.spin_target_rot_y.value()
     
     def _check_service(self) -> bool:
         """Check if service is ready."""
@@ -289,7 +297,8 @@ class SeamlessLoopToolWindow(QtWidgets.QWidget):
                     start_frame=self.start_frame,
                     loop_frame=self.end_frame,
                     blend_frames=self.blend_frames,
-                    in_place=True
+                    in_place=True,
+                    target_rot_y=self.target_rot_y,
                 )
                 self.processed = True
                 bone_count = len(processed_data)
@@ -302,7 +311,8 @@ class SeamlessLoopToolWindow(QtWidgets.QWidget):
                     start_frame=self.start_frame,
                     loop_frame=self.end_frame,
                     blend_frames=self.blend_frames,
-                    in_place=True
+                    in_place=True,
+                    target_rot_y=self.target_rot_y,
                 )
                 self.processed = True
                 self._set_status(f"Processed: {len(trajectory)} frames (root only)")

@@ -218,3 +218,24 @@ class TestRootProcessor:
             result[-1], result[0],
             err_msg="Last frame should equal first frame after linear offset"
         )
+
+    def test_align_orientation_offsets_rotation_y(self):
+        """
+        align_orientation should offset rotation Y so frame 0 equals target.
+        """
+        processor = RootProcessor()
+
+        trajectory = np.array([
+            [0.0, 0.0, 0.0, 0.0, 170.0, 0.0],
+            [1.0, 0.0, 0.0, 0.0, 175.0, 0.0],
+            [2.0, 0.0, 0.0, 0.0, 190.0, 0.0],
+        ])
+
+        result = processor.align_orientation(trajectory, target_rot_y=180.0)
+
+        assert result[0, 4] == 180.0
+        np.testing.assert_array_equal(result[:, 4], trajectory[:, 4] + 10.0)
+        np.testing.assert_array_equal(
+            result[:, [0, 1, 2, 3, 5]],
+            trajectory[:, [0, 1, 2, 3, 5]],
+        )

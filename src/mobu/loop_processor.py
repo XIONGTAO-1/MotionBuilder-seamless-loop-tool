@@ -285,7 +285,8 @@ class LoopProcessorService:
         start_frame: Optional[int] = None,
         blend_frames: int = 5,
         in_place: bool = True,
-        use_cycle_detection: bool = True
+        use_cycle_detection: bool = True,
+        target_rot_y: Optional[float] = None,
     ) -> np.ndarray:
         """
         Create a seamless looping animation from the current take.
@@ -303,6 +304,7 @@ class LoopProcessorService:
             blend_frames: Number of frames to crossfade at the end
             in_place: Whether to lock XZ at frame 0's position
             use_cycle_detection: If True and frames are None, detect mid-animation cycle
+            target_rot_y: If set, offset root rotation Y so frame 0 equals this value
             
         Returns:
             The processed trajectory ready for export
@@ -352,6 +354,9 @@ class LoopProcessorService:
         #       DO NOT call reset_origin before this!
         if in_place:
             trajectory = self.root_processor.process_in_place(trajectory)
+
+        if target_rot_y is not None:
+            trajectory = self.root_processor.align_orientation(trajectory, target_rot_y=target_rot_y)
         
         self.processed_trajectory = trajectory
         return trajectory
@@ -363,7 +368,8 @@ class LoopProcessorService:
         start_frame: Optional[int] = None,
         blend_frames: int = 5,
         in_place: bool = True,
-        use_cycle_detection: bool = True
+        use_cycle_detection: bool = True,
+        target_rot_y: Optional[float] = None,
     ) -> dict:
         """
         Create a seamless looping animation for THE ENTIRE HIERARCHY.
@@ -381,6 +387,7 @@ class LoopProcessorService:
             blend_frames: Number of frames to crossfade
             in_place: Whether to lock root XZ
             use_cycle_detection: If True and frames are None, detect cycle
+            target_rot_y: If set, offset root rotation Y so frame 0 equals this value
             
         Returns:
             Dictionary mapping bone names to processed trajectories
@@ -437,6 +444,9 @@ class LoopProcessorService:
                 is_root = (bone_name == bone_names[0])
                 if in_place and is_root:
                     trajectory = self.root_processor.process_in_place(trajectory)
+
+                if target_rot_y is not None and is_root:
+                    trajectory = self.root_processor.align_orientation(trajectory, target_rot_y=target_rot_y)
                 
                 self.processed_data[bone_name] = trajectory
                 

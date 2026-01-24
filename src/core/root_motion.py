@@ -88,6 +88,20 @@ class RootProcessor:
         # Columns 3+ (rotations if present) are untouched
         return result
 
+    def align_orientation(self, trajectory: np.ndarray, target_rot_y: Optional[float] = None) -> np.ndarray:
+        """
+        Align root orientation by offsetting rotation Y (Euler) by a constant amount.
+
+        If target_rot_y is None, this is a no-op that returns a copy.
+        """
+        if target_rot_y is None or len(trajectory) == 0 or trajectory.shape[1] < 5:
+            return trajectory.copy()
+
+        result = trajectory.copy()
+        offset = target_rot_y - float(result[0, 4])
+        result[:, 4] = result[:, 4] + offset
+        return result
+
     def reset_origin(self, trajectory: np.ndarray) -> np.ndarray:
         """
         Translate trajectory so frame 0 is at world origin.
