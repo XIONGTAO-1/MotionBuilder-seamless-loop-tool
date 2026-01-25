@@ -403,6 +403,136 @@ class TestLoopProcessorService:
         _, updated_translations, _ = adapter.get_mock_trajectory(take, foot)
         assert updated_translations[0:5] == [(0, 0.0, 0)] * 5
 
+    def test_apply_foot_contact_fix_uses_relative_speed(self):
+        adapter = MockMoBuAdapter()
+        service = LoopProcessorService(adapter)
+        take = "Take 001"
+        foot = "LeftFoot"
+        frames = [0, 1, 2, 3, 4]
+        local_translations = [(0, 2.0, 0)] * 5
+
+        adapter.set_mock_trajectory(take, foot, frames, local_translations, [])
+        adapter.set_mock_world_positions(
+            take,
+            foot,
+            [(0.0, 0.5, 0.0), (-1.0, 0.5, 0.0), (-2.0, 0.5, 0.0), (-3.0, 0.5, 0.0), (-4.0, 0.5, 0.0)],
+        )
+
+        root_velocity = np.array([[1.0, 0.0, 0.0]] * 5, dtype=float)
+
+        contacts = service.apply_foot_contact_fix(
+            take,
+            foot,
+            ground_height=0.0,
+            height_threshold=1.0,
+            speed_threshold=0.1,
+            min_span=3,
+            root_velocity=root_velocity,
+        )
+
+        assert contacts == [(0, 4)]
+
+    def test_create_seamless_loop_hierarchy_stores_contacts_abs(self):
+        class ContactAdapter(MockMoBuAdapter):
+            def __init__(self, trajectory, frame_range, world_positions):
+                super().__init__(mock_trajectory=trajectory, mock_frame_range=frame_range)
+                self.world_positions = world_positions
+
+            def get_hierarchy_nodes(self, root_name="Hips"):
+                return ["Hips", "LeftFoot", "RightFoot"]
+
+            def get_node_trajectory(self, node_name, start_frame=None, end_frame=None):
+                data = self._trajectory.copy()
+                if start_frame is None or end_frame is None:
+                    return data
+                base = self._frame_range[0]
+                start_idx = max(0, start_frame - base)
+                end_idx = min(len(data) - 1, end_frame - base)
+                return data[start_idx : end_idx + 1]
+
+            def get_world_translations(self, node_name, start_frame=None, end_frame=None):
+                base = self._frame_range[0]
+                positions = self.world_positions[node_name]
+                if start_frame is None or end_frame is None:
+                    return np.array(positions, dtype=float)
+                start_idx = max(0, start_frame - base)
+                end_idx = min(len(positions) - 1, end_frame - base)
+                return np.array(positions[start_idx : end_idx + 1], dtype=float)
+
+        trajectory = np.zeros((5, 6))
+        trajectory[:, 0] = np.arange(5)
+        adapter = ContactAdapter(
+            trajectory=trajectory,
+            frame_range=(100, 104),
+            world_positions={
+                "LeftFoot": [(0.0, 0.5, 0.0)] * 5,
+                "LeftToeBase": [(0.0, 0.6, 0.0)] * 5,
+                "RightFoot": [(0.0, 0.5, 0.0)] * 5,
+                "RightToeBase": [(0.0, 0.6, 0.0)] * 5,
+            },
+        )
+        service = LoopProcessorService(adapter)
+
+        service.create_seamless_loop_hierarchy(
+            root_name="Hips",
+            start_frame=100,
+            loop_frame=104,
+            in_place=True,
+            left_foot="LeftFoot",
+            right_foot="RightFoot",
+            left_toe="LeftToeBase",
+            right_toe="RightToeBase",
+            enable_foot_fix=True,
+            contact_height_threshold=1.0,
+            contact_speed_threshold=1.1,
+            contact_min_span=3,
+        )
+
+        assert service.processed_contacts_abs["LeftFoot"] == [(100, 104)]
+
+    def test_map_contacts_abs_to_local_frames_with_fps(self):
+        service = LoopProcessorService(MockMoBuAdapter())
+        mapped = service._map_contacts_abs_to_local(
+            [(100, 104)],
+            loop_start_frame_abs=100,
+            source_fps=30.0,
+            target_fps=60.0,
+            target_frame_count=9,
+        )
+        assert mapped == [(0, 8)]
+
+    def test_apply_changes_hierarchy_uses_stored_contacts(self):
+        class ClampAdapter(MockMoBuAdapter):
+            def __init__(self, trajectory, frame_range=(0, 4)):
+                super().__init__(mock_trajectory=trajectory, mock_frame_range=frame_range)
+                self.clamped = []
+
+            def get_hierarchy_nodes(self, root_name="Hips"):
+                return ["Hips", "LeftFoot"]
+
+            def clamp_node_to_ground(self, node_name, frame_intervals, ground_height=0.0):
+                self.clamped.append((node_name, frame_intervals))
+                return 0
+
+        trajectory = np.zeros((5, 6))
+        adapter = ClampAdapter(trajectory)
+        service = LoopProcessorService(adapter)
+        service.processed_data = {"Hips": trajectory}
+        service.processed_trajectory = trajectory
+        service.loop_start_frame = 100
+        service.best_loop_frame = 104
+        service.processed_contact_source_fps = 30.0
+        service.processed_contacts_abs = {"LeftFoot": [(100, 104)]}
+
+        service.apply_changes_hierarchy(
+            preserve_original=False,
+            left_foot="LeftFoot",
+            enable_foot_fix=True,
+            target_fps=60.0,
+        )
+
+        assert adapter.clamped == [("LeftFoot", [(0, 8)])]
+
     def test_apply_changes_hierarchy_skips_foot_fix_when_disabled(self):
         """apply_changes_hierarchy should skip foot fix when enable_foot_fix=False."""
         class FakeAdapter:
@@ -447,4 +577,3 @@ class TestLoopProcessorService:
 
         assert adapter.foot_fix_called is False
         assert "Hips" in adapter.written_nodes
-

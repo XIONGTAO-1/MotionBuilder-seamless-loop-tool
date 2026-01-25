@@ -239,6 +239,152 @@ class TestMoBuAdapterSetRootTrajectory:
         assert interp_calls
         assert tangent_calls
 
+
+class TestMoBuAdapterWorldTranslations:
+    """Tests for world-translation sampling with GetMatrix API differences."""
+
+    def test_get_world_translations_falls_back_without_time_arg(self, monkeypatch):
+        class FakeTime:
+            def __init__(self, _h=0, _m=0, _s=0, frame=0, *_args):
+                self._frame = frame
+
+            def GetFrame(self):
+                return self._frame
+
+        class FakeMatrix:
+            def __init__(self):
+                self._data = [[0.0] * 4 for _ in range(4)]
+
+            def __getitem__(self, idx):
+                return self._data[idx]
+
+        class FakeSystem:
+            last_instance = None
+
+            def __init__(self):
+                self._local_time = FakeTime(frame=0)
+                FakeSystem.last_instance = self
+
+            @property
+            def LocalTime(self):
+                return self._local_time
+
+            @LocalTime.setter
+            def LocalTime(self, value):
+                self._local_time = value
+
+        class FakePlayer:
+            def Goto(self, time):
+                FakeSystem.last_instance.LocalTime = time
+
+        class FakeModelTransformationType:
+            kModelTransformation = "xform"
+
+        class FakeModel:
+            def __init__(self):
+                self.Translation = object()
+
+            def GetMatrix(self, matrix, _xform_type=None, _world=True):
+                frame = FakeSystem.last_instance.LocalTime.GetFrame()
+                matrix[0][3] = float(frame)
+                matrix[1][3] = float(frame + 10)
+                matrix[2][3] = float(frame + 20)
+
+        fake_model = FakeModel()
+
+        monkeypatch.setattr(adapter_module, "IN_MOTIONBUILDER", True)
+        monkeypatch.setattr(adapter_module, "FBSystem", FakeSystem)
+        monkeypatch.setattr(adapter_module, "FBPlayerControl", FakePlayer)
+        monkeypatch.setattr(adapter_module, "FBFindModelByLabelName", lambda name: fake_model)
+        monkeypatch.setattr(adapter_module, "FBFindModelByName", lambda name: fake_model)
+        monkeypatch.setattr(adapter_module, "FBTime", FakeTime)
+        monkeypatch.setattr(adapter_module, "FBMatrix", FakeMatrix)
+        monkeypatch.setattr(
+            adapter_module,
+            "FBModelTransformationType",
+            FakeModelTransformationType,
+        )
+
+        adapter = adapter_module.MoBuAdapter()
+
+        positions = adapter.get_world_translations("Hips", start_frame=0, end_frame=2)
+
+        assert positions.shape == (3, 3)
+        assert positions[:, 0].tolist() == [0.0, 1.0, 2.0]
+        assert positions[:, 1].tolist() == [10.0, 11.0, 12.0]
+        assert positions[:, 2].tolist() == [20.0, 21.0, 22.0]
+
+    def test_get_world_translations_handles_flat_matrix(self, monkeypatch):
+        class FakeTime:
+            def __init__(self, _h=0, _m=0, _s=0, frame=0, *_args):
+                self._frame = frame
+
+            def GetFrame(self):
+                return self._frame
+
+        class FakeMatrix:
+            def __init__(self):
+                self._data = [0.0] * 16
+
+            def __getitem__(self, idx):
+                return self._data[idx]
+
+        class FakeSystem:
+            last_instance = None
+
+            def __init__(self):
+                self._local_time = FakeTime(frame=0)
+                FakeSystem.last_instance = self
+
+            @property
+            def LocalTime(self):
+                return self._local_time
+
+            @LocalTime.setter
+            def LocalTime(self, value):
+                self._local_time = value
+
+        class FakePlayer:
+            def Goto(self, time):
+                FakeSystem.last_instance.LocalTime = time
+
+        class FakeModelTransformationType:
+            kModelTransformation = "xform"
+
+        class FakeModel:
+            def __init__(self):
+                self.Translation = object()
+
+            def GetMatrix(self, matrix, _xform_type=None, _world=True):
+                frame = FakeSystem.last_instance.LocalTime.GetFrame()
+                matrix._data[3] = float(frame)
+                matrix._data[7] = float(frame + 10)
+                matrix._data[11] = float(frame + 20)
+
+        fake_model = FakeModel()
+
+        monkeypatch.setattr(adapter_module, "IN_MOTIONBUILDER", True)
+        monkeypatch.setattr(adapter_module, "FBSystem", FakeSystem)
+        monkeypatch.setattr(adapter_module, "FBPlayerControl", FakePlayer)
+        monkeypatch.setattr(adapter_module, "FBFindModelByLabelName", lambda name: fake_model)
+        monkeypatch.setattr(adapter_module, "FBFindModelByName", lambda name: fake_model)
+        monkeypatch.setattr(adapter_module, "FBTime", FakeTime)
+        monkeypatch.setattr(adapter_module, "FBMatrix", FakeMatrix)
+        monkeypatch.setattr(
+            adapter_module,
+            "FBModelTransformationType",
+            FakeModelTransformationType,
+        )
+
+        adapter = adapter_module.MoBuAdapter()
+
+        positions = adapter.get_world_translations("Hips", start_frame=0, end_frame=2)
+
+        assert positions.shape == (3, 3)
+        assert positions[:, 0].tolist() == [0.0, 1.0, 2.0]
+        assert positions[:, 1].tolist() == [10.0, 11.0, 12.0]
+        assert positions[:, 2].tolist() == [20.0, 21.0, 22.0]
+
     def test_plot_animation_uses_custom_time_mode_without_fps_arg(self, monkeypatch):
         """plot_animation_on_skeleton should not pass an fps value to FBTime."""
         calls = []

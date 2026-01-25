@@ -5,8 +5,11 @@ Provides an abstraction layer between the core algorithms and pyfbsdk.
 This allows the core logic to be tested independently of MotionBuilder.
 """
 
+import logging
 import numpy as np
 from typing import Optional, Tuple, Dict
+
+logger = logging.getLogger(__name__)
 
 # Try to import pyfbsdk - will only work inside MotionBuilder
 IN_MOTIONBUILDER = False
@@ -361,7 +364,7 @@ class MoBuAdapter:
         # Try exact match first - trust the user's selection
         model = find_model_exact(root_name)
         if is_valid_model(model):
-            print(f"[SeamlessLoopTool] Found exact match: {model_display_name(model)}")
+            logger.info("Found exact match: %s", model_display_name(model))
             return model
         
         # Build search list with user's name first
@@ -375,7 +378,7 @@ class MoBuAdapter:
         for pattern in search_list:
             model = find_model_exact(pattern)
             if model is not None:
-                print(f"[SeamlessLoopTool] Found pattern match: {model_display_name(model)}")
+                logger.info("Found pattern match: %s", model_display_name(model))
                 return model
         
         # Search all models in scene for matching name (fuzzy search)
@@ -403,10 +406,14 @@ class MoBuAdapter:
         collect_models(scene.RootModel)
         
         if found_models:
-            print(f"[SeamlessLoopTool] Fuzzy matched: {model_display_name(found_models[0])} from {len(found_models)} candidates")
+            logger.info(
+                "Fuzzy matched: %s from %d candidates",
+                model_display_name(found_models[0]),
+                len(found_models),
+            )
             return found_models[0]
         
-        print(f"[SeamlessLoopTool] No bone found matching: {search_list[:5]}...")
+        logger.warning("No bone found matching: %s...", search_list[:5])
         return None
 
     def _collect_child_models(self, parent, result) -> None:
@@ -457,7 +464,7 @@ class MoBuAdapter:
             if label:
                 names.append(label)
         
-        print(f"[SeamlessLoopTool] Found {len(names)} bones in hierarchy")
+        logger.info("Found %d bones in hierarchy", len(names))
         return names
 
     def get_node_trajectory(
@@ -511,6 +518,149 @@ class MoBuAdapter:
         
         return trajectory
 
+    def _get_local_time(self):
+        system = getattr(self, "_system", None)
+        if system is not None:
+            try:
+                return system.LocalTime
+            except Exception:
+                pass
+
+        player = getattr(self, "_player", None)
+        get_time = getattr(player, "GetTransportTime", None)
+        if callable(get_time):
+            try:
+                return get_time()
+            except Exception:
+                pass
+        return None
+
+    def _set_local_time(self, time) -> bool:
+        if time is None:
+            return False
+
+        system = getattr(self, "_system", None)
+        if system is not None:
+            try:
+                system.LocalTime = time
+                return True
+            except Exception:
+                pass
+            try:
+                local_time = getattr(system, "LocalTime", None)
+                if local_time is not None and hasattr(local_time, "Set"):
+                    local_time.Set(time)
+                    return True
+            except Exception:
+                pass
+
+        player = getattr(self, "_player", None)
+        goto = getattr(player, "Goto", None)
+        if callable(goto):
+            try:
+                goto(time)
+                return True
+            except Exception:
+                pass
+        return False
+
+    def _get_model_matrix(self, model, time, xform_type=None):
+        if model is None or FBMatrix is None:
+            return None
+
+        fb_matrix = FBMatrix()
+        if xform_type is None and FBModelTransformationType is not None:
+            xform_type = getattr(FBModelTransformationType, "kModelTransformation", None)
+
+        if xform_type is None:
+            model.GetMatrix(fb_matrix)
+            return fb_matrix
+
+        try:
+            model.GetMatrix(fb_matrix, xform_type, True, time)
+            return fb_matrix
+        except TypeError:
+            pass
+
+        prev_time = self._get_local_time()
+        time_set = self._set_local_time(time)
+        try:
+            try:
+                model.GetMatrix(fb_matrix, xform_type, True)
+            except TypeError:
+                try:
+                    model.GetMatrix(fb_matrix, xform_type)
+                except TypeError:
+                    model.GetMatrix(fb_matrix)
+        finally:
+            if time_set and prev_time is not None:
+                self._set_local_time(prev_time)
+
+        return fb_matrix
+
+    def _matrix_value(self, fb_matrix, row: int, col: int) -> Optional[float]:
+        if fb_matrix is None:
+            return None
+        try:
+            return float(fb_matrix[row][col])
+        except TypeError:
+            try:
+                return float(fb_matrix[row * 4 + col])
+            except Exception:
+                return None
+        except Exception:
+            return None
+
+    def _matrix_translation(self, fb_matrix) -> Optional[Tuple[float, float, float]]:
+        # MotionBuilder/pyfbsdk matrix indexing/layout can vary across versions
+        # (and wrapper types). Translation may appear in the last column OR
+        # the last row depending on convention. We try both and pick the one
+        # that looks like a real translation vector.
+        col = (
+            self._matrix_value(fb_matrix, 0, 3),
+            self._matrix_value(fb_matrix, 1, 3),
+            self._matrix_value(fb_matrix, 2, 3),
+        )
+        row = (
+            self._matrix_value(fb_matrix, 3, 0),
+            self._matrix_value(fb_matrix, 3, 1),
+            self._matrix_value(fb_matrix, 3, 2),
+        )
+
+        col_ok = all(v is not None for v in col)
+        row_ok = all(v is not None for v in row)
+        if not col_ok and not row_ok:
+            return None
+        if col_ok and not row_ok:
+            return (float(col[0]), float(col[1]), float(col[2]))
+        if row_ok and not col_ok:
+            return (float(row[0]), float(row[1]), float(row[2]))
+
+        col_mag = abs(float(col[0])) + abs(float(col[1])) + abs(float(col[2]))
+        row_mag = abs(float(row[0])) + abs(float(row[1])) + abs(float(row[2]))
+        if row_mag > col_mag:
+            return (float(row[0]), float(row[1]), float(row[2]))
+        return (float(col[0]), float(col[1]), float(col[2]))
+
+    def _matrix_to_array(self, fb_matrix) -> Optional[np.ndarray]:
+        if fb_matrix is None:
+            return None
+        try:
+            return np.array(
+                [[fb_matrix[r][c] for c in range(4)] for r in range(4)],
+                dtype=float,
+            )
+        except TypeError:
+            try:
+                return np.array(
+                    [[fb_matrix[r * 4 + c] for c in range(4)] for r in range(4)],
+                    dtype=float,
+                )
+            except Exception:
+                return None
+        except Exception:
+            return None
+
     def get_world_translations(
         self,
         node_name: str,
@@ -536,16 +686,13 @@ class MoBuAdapter:
             time = FBTime(0, 0, 0, frame)
 
             if FBMatrix is not None and FBModelTransformationType is not None:
-                fb_matrix = FBMatrix()
-                model.GetMatrix(
-                    fb_matrix,
-                    FBModelTransformationType.kModelTransformation_Transformation,
-                    True,
-                    time,
-                )
-                positions[i, 0] = fb_matrix[0][3]
-                positions[i, 1] = fb_matrix[1][3]
-                positions[i, 2] = fb_matrix[2][3]
+                fb_matrix = self._get_model_matrix(model, time)
+                if fb_matrix is not None:
+                    translation = self._matrix_translation(fb_matrix)
+                    if translation is not None:
+                        positions[i, 0] = translation[0]
+                        positions[i, 1] = translation[1]
+                        positions[i, 2] = translation[2]
             else:
                 translation = model.Translation.GetAnimationNode()
                 if translation and hasattr(translation, "Nodes") and len(translation.Nodes) >= 3:
@@ -554,6 +701,112 @@ class MoBuAdapter:
                     positions[i, 2] = translation.Nodes[2].FCurve.Evaluate(time)
 
         return positions
+
+    def clamp_node_to_ground(
+        self,
+        node_name: str,
+        frame_intervals: list,
+        ground_height: float = 0.0,
+    ) -> int:
+        """
+        Clamp a node's world position during contact intervals.
+        
+        For each contact interval:
+        - Lock X/Z to the position at the first frame of contact (prevent sliding)
+        - Lock Y to ground_height (plant foot on ground)
+        
+        This uses world-space delta correction that properly respects bone hierarchy.
+        
+        Args:
+            node_name: Name of the bone to clamp
+            frame_intervals: List of (start_frame, end_frame) tuples
+            ground_height: Target ground height (default 0.0)
+            
+        Returns:
+            Number of frames that were keyed
+        """
+        model = self.find_root_bone(node_name)
+        if model is None:
+            logger.warning("clamp_node_to_ground: bone '%s' not found", node_name)
+            return 0
+        
+        if FBTime is None:
+            logger.warning("clamp_node_to_ground: FBTime not available")
+            return 0
+        
+        keyed_count = 0
+        
+        for start_frame, end_frame in frame_intervals:
+            # Get the world position at the first frame of contact (lock point)
+            lock_time = FBTime(0, 0, 0, start_frame)
+            lock_world_x = None
+            lock_world_z = None
+            
+            if FBMatrix is not None and FBModelTransformationType is not None:
+                try:
+                    fb_matrix = self._get_model_matrix(model, lock_time)
+                    if fb_matrix is not None:
+                        translation = self._matrix_translation(fb_matrix)
+                        if translation is not None:
+                            lock_world_x = translation[0]
+                            lock_world_z = translation[2]
+                except Exception as e:
+                    logger.warning("GetMatrix failed at lock frame %d: %s", start_frame, e)
+            
+            for frame in range(start_frame, end_frame + 1):
+                time = FBTime(0, 0, 0, frame)
+                
+                # Get current world position
+                if FBMatrix is not None and FBModelTransformationType is not None:
+                    try:
+                        fb_matrix = self._get_model_matrix(model, time)
+                        if fb_matrix is None:
+                            continue
+                        translation = self._matrix_translation(fb_matrix)
+                        if translation is None:
+                            continue
+                        world_x = translation[0]
+                        world_y = translation[1]
+                        world_z = translation[2]
+                    except Exception as e:
+                        logger.warning("GetMatrix failed at frame %d: %s", frame, e)
+                        continue
+                else:
+                    continue
+                
+                # Calculate deltas to move to locked X/Z and ground Y
+                delta_x = (lock_world_x - world_x) if lock_world_x is not None else 0.0
+                delta_y = ground_height - world_y
+                delta_z = (lock_world_z - world_z) if lock_world_z is not None else 0.0
+                
+                # Read current local translation
+                translation_node = model.Translation.GetAnimationNode()
+                if translation_node is None or not hasattr(translation_node, "Nodes"):
+                    continue
+                if len(translation_node.Nodes) < 3:
+                    continue
+                
+                local_x = translation_node.Nodes[0].FCurve.Evaluate(time)
+                local_y = translation_node.Nodes[1].FCurve.Evaluate(time)
+                local_z = translation_node.Nodes[2].FCurve.Evaluate(time)
+                
+                # Apply deltas to local translations
+                new_local_x = local_x + delta_x
+                new_local_y = local_y + delta_y
+                new_local_z = local_z + delta_z
+                
+                # Key all three channels
+                translation_node.Nodes[0].FCurve.KeyAdd(time, float(new_local_x))
+                translation_node.Nodes[1].FCurve.KeyAdd(time, float(new_local_y))
+                translation_node.Nodes[2].FCurve.KeyAdd(time, float(new_local_z))
+                keyed_count += 1
+        
+        logger.info(
+            "clamp_node_to_ground: keyed %d frames for '%s' (XYZ locked)",
+            keyed_count,
+            node_name,
+        )
+        return keyed_count
 
     def set_node_trajectory(
         self,
@@ -684,17 +937,13 @@ class MoBuAdapter:
         for model in all_models:
             if model.GetAnimationNode():
                 if FBMatrix is not None:
-                    fb_matrix = FBMatrix()
-                    model.GetMatrix(
-                        fb_matrix,
-                        FBModelTransformationType.kModelTransformation_Transformation,
-                        True,
-                        time
-                    )
-                    matrix = np.array(
-                        [[fb_matrix[r][c] for c in range(4)] for r in range(4)],
-                        dtype=float
-                    )
+                    fb_matrix = self._get_model_matrix(model, time)
+                    if fb_matrix is not None:
+                        matrix = self._matrix_to_array(fb_matrix)
+                        if matrix is None:
+                            matrix = np.eye(4)
+                    else:
+                        matrix = np.eye(4)
                 else:
                     matrix = np.eye(4)
                 poses[model.Name] = matrix

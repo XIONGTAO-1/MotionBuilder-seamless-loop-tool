@@ -6,10 +6,13 @@ the MoBu adapter with the core algorithms.
 """
 
 import numpy as np
+import logging
 from typing import Tuple, Optional, List
 
 from core.loop_analysis import FrameAnalyzer
 from core.root_motion import RootProcessor
+
+logger = logging.getLogger(__name__)
 
 
 class LoopProcessorService:
@@ -37,6 +40,10 @@ class LoopProcessorService:
         self.best_loop_frame: Optional[int] = None
         self.loop_start_frame: Optional[int] = None
         self.processed_trajectory: Optional[np.ndarray] = None
+        self.processed_root_pre_inplace: Optional[np.ndarray] = None
+        self.processed_in_place: bool = False
+        self.processed_contacts_abs: dict = {}
+        self.processed_contact_source_fps: Optional[float] = None
 
     def analyze_loop_points(
         self, 
@@ -182,6 +189,8 @@ class LoopProcessorService:
             The processed trajectory
         """
         trajectory = self.adapter.get_root_trajectory(root_name)
+        self.processed_root_pre_inplace = trajectory.copy()
+        self.processed_in_place = True
         
         # Do NOT reset origin! 
         # process_in_place locks to frame 0, which preserves the initial position.
@@ -257,6 +266,45 @@ class LoopProcessorService:
         if hasattr(self.adapter, "_set_take_time_span"):
             self.adapter._set_take_time_span(0, len(trajectory) - 1)
 
+    def _map_contacts_abs_to_local(
+        self,
+        intervals_abs: List[Tuple[int, int]],
+        loop_start_frame_abs: Optional[int],
+        source_fps: Optional[float],
+        target_fps: Optional[float],
+        target_frame_count: Optional[int],
+    ) -> List[Tuple[int, int]]:
+        if not intervals_abs:
+            return []
+        if loop_start_frame_abs is None:
+            return []
+        if not target_frame_count or target_frame_count <= 0:
+            return []
+
+        if source_fps is None or target_fps is None:
+            mapped = [
+                (start - loop_start_frame_abs, end - loop_start_frame_abs)
+                for start, end in intervals_abs
+            ]
+        else:
+            def map_frame(frame: int) -> int:
+                time_sec = (frame - loop_start_frame_abs) / source_fps
+                return int(round(time_sec * target_fps))
+
+            mapped = [(map_frame(start), map_frame(end)) for start, end in intervals_abs]
+
+        result = []
+        last_frame = target_frame_count - 1
+        for start, end in mapped:
+            if start > end:
+                start, end = end, start
+            start = max(0, min(last_frame, start))
+            end = max(0, min(last_frame, end))
+            if end >= start:
+                result.append((start, end))
+
+        return result
+
     def apply_changes_hierarchy(
         self, 
         root_name: str = "Hips", 
@@ -292,9 +340,14 @@ class LoopProcessorService:
         if not hasattr(self, 'processed_data') or not self.processed_data:
             raise RuntimeError("No processed data. Call create_seamless_loop_hierarchy first.")
 
-        source_fps = None
+        current_fps = None
         if target_fps is not None and hasattr(self.adapter, "get_current_fps"):
-            source_fps = self.adapter.get_current_fps()
+            try:
+                current_fps = self.adapter.get_current_fps()
+            except Exception:
+                current_fps = None
+        if target_fps is not None and current_fps is None:
+            current_fps = self.processed_contact_source_fps
 
         self._ensure_take_copy(root_name, preserve_original)
         if target_fps is not None and hasattr(self.adapter, "set_transport_fps"):
@@ -304,10 +357,10 @@ class LoopProcessorService:
         resampled_root = None
         for bone_name, trajectory in self.processed_data.items():
             try:
-                if target_fps is not None and source_fps is not None:
+                if target_fps is not None and current_fps is not None:
                     trajectory = self.root_processor.resample_trajectory_to_fps(
                         trajectory,
-                        source_fps=source_fps,
+                        source_fps=current_fps,
                         target_fps=target_fps,
                     )
                 if bone_name == root_name:
@@ -322,32 +375,74 @@ class LoopProcessorService:
         
         # Set final time span
         span_source = resampled_root if resampled_root is not None else self.processed_trajectory
+        target_frame_count = 0
         if span_source is not None:
             num_frames = len(span_source)
+            target_frame_count = num_frames
             if hasattr(self.adapter, '_set_take_time_span'):
                 self.adapter._set_take_time_span(0, num_frames - 1)
 
-        take_name = None
-        if hasattr(self.adapter, "get_current_take_name"):
+        target_fps_value = target_fps
+        if target_fps_value is None and hasattr(self.adapter, "get_current_fps"):
             try:
-                take_name = self.adapter.get_current_take_name()
+                target_fps_value = self.adapter.get_current_fps()
             except Exception:
-                take_name = None
+                target_fps_value = None
+
+        logger.info(
+            "FootFix: enable=%s, stored_contacts=%s, source_fps=%s, target_fps=%s, left=%s/%s, right=%s/%s, "
+            "ground_height=%.3f, height_thres=%.3f, metric_thres=%.3f, min_span=%d",
+            enable_foot_fix,
+            bool(self.processed_contacts_abs),
+            self.processed_contact_source_fps if self.processed_contact_source_fps is not None else "no",
+            target_fps_value if target_fps_value is not None else "no",
+            left_foot,
+            left_toe,
+            right_foot,
+            right_toe,
+            float(ground_height),
+            float(contact_height_threshold),
+            float(contact_speed_threshold),
+            int(contact_min_span),
+        )
 
         if enable_foot_fix:
-            for foot_name, toe_name in ((left_foot, left_toe), (right_foot, right_toe)):
-                if foot_name:
-                    self.apply_foot_contact_fix(
-                        take_name or "",
-                        foot_name,
-                        toe_name,
-                        ground_height=ground_height,
-                        height_threshold=contact_height_threshold,
-                        speed_threshold=contact_speed_threshold,
-                        min_span=contact_min_span,
+            if not self.processed_contacts_abs:
+                logger.info("FootFix: no stored contacts; skipping clamp")
+            elif self.loop_start_frame is None:
+                logger.info("FootFix: missing loop_start_frame; skipping clamp")
+            elif target_frame_count <= 0:
+                logger.info("FootFix: missing target frame count; skipping clamp")
+            elif not hasattr(self.adapter, "clamp_node_to_ground"):
+                logger.info("FootFix: adapter lacks clamp_node_to_ground; skipping clamp")
+            else:
+                logger.info("FootFix: using stored contacts from Process; thresholds ignored in Apply")
+                for foot_name, toe_name in ((left_foot, left_toe), (right_foot, right_toe)):
+                    if not foot_name:
+                        continue
+                    intervals_abs = self.processed_contacts_abs.get(foot_name, [])
+                    intervals_local = self._map_contacts_abs_to_local(
+                        intervals_abs,
+                        loop_start_frame_abs=self.loop_start_frame,
+                        source_fps=self.processed_contact_source_fps,
+                        target_fps=target_fps_value,
+                        target_frame_count=target_frame_count,
                     )
+                    if not intervals_local:
+                        continue
+                    self.adapter.clamp_node_to_ground(
+                        foot_name,
+                        intervals_local,
+                        ground_height=ground_height,
+                    )
+                    if toe_name:
+                        self.adapter.clamp_node_to_ground(
+                            toe_name,
+                            intervals_local,
+                            ground_height=ground_height,
+                        )
         
-        print(f"[SeamlessLoopTool] Wrote {bone_count} bones to new Take")
+        logger.info("Wrote %d bones to new Take", bone_count)
 
     def detect_contact_intervals(
         self,
@@ -365,6 +460,46 @@ class LoopProcessorService:
             for height, speed in zip(heights, speeds)
         ]
         return self._extract_intervals(contact_mask, min_span)
+
+    def _compute_contact_intervals_for_foot(
+        self,
+        foot_name: str,
+        toe_name: Optional[str],
+        start_frame: int,
+        end_frame: int,
+        ground_height: float,
+        height_threshold: float,
+        speed_threshold: float,
+        min_span: int,
+        root_velocity: Optional[np.ndarray],
+    ) -> List[Tuple[int, int]]:
+        foot_positions = self._get_world_positions(foot_name, start_frame, end_frame)
+        if foot_positions.size == 0:
+            return []
+
+        toe_positions = None
+        if toe_name:
+            toe_positions = self._get_world_positions(toe_name, start_frame, end_frame)
+
+        up_axis = self.root_processor.up_axis
+        heights = []
+        for idx, foot_pos in enumerate(foot_positions):
+            foot_height = foot_pos[up_axis]
+            if toe_positions is not None and idx < len(toe_positions):
+                toe_height = toe_positions[idx][up_axis]
+                height = min(foot_height, toe_height)
+            else:
+                height = foot_height
+            heights.append(height - ground_height)
+
+        metric = self._compute_contact_metric(foot_positions, root_velocity)
+        return self.detect_contact_intervals(
+            heights,
+            metric,
+            height_threshold=height_threshold,
+            speed_threshold=speed_threshold,
+            min_span=min_span,
+        )
 
     def apply_stance_correction(
         self,
@@ -405,6 +540,7 @@ class LoopProcessorService:
         height_threshold: float = 2.0,
         speed_threshold: float = 0.5,
         min_span: int = 3,
+        root_velocity: Optional[np.ndarray] = None,
     ) -> List[Tuple[int, int]]:
         start_frame, end_frame = self.adapter.get_frame_range()
         foot_positions = self._get_world_positions(foot_name, start_frame, end_frame)
@@ -427,22 +563,86 @@ class LoopProcessorService:
                 height = foot_height
             heights.append(height - ground_height)
 
-        speeds = self._compute_speeds(foot_positions)
+        metric = self._compute_contact_metric(foot_positions, root_velocity)
         contacts = self.detect_contact_intervals(
             heights,
-            speeds,
+            metric,
             height_threshold=height_threshold,
             speed_threshold=speed_threshold,
             min_span=min_span,
         )
+        metric_label = "speed"
+        if root_velocity is not None:
+            metric_label = "rel_accel"
 
-        self.apply_stance_correction(
-            take_name, foot_name, contacts, ground_height=ground_height
-        )
-        if toe_name:
-            self.apply_stance_correction(
-                take_name, toe_name, contacts, ground_height=ground_height
+        if heights and metric:
+            logger.info(
+                "FootFix '%s': contacts=%d, height[min,max]=(%.3f,%.3f), %s[min,max]=(%.3f,%.3f), "
+                "thres(height<=%.3f, %s<=%.3f)",
+                foot_name,
+                len(contacts),
+                float(min(heights)),
+                float(max(heights)),
+                metric_label,
+                float(min(metric)),
+                float(max(metric)),
+                float(height_threshold),
+                metric_label,
+                float(speed_threshold),
             )
+
+        if contacts:
+            abs_intervals = [(start_frame + s, start_frame + e) for (s, e) in contacts[:5]]
+            extra = ""
+            if len(contacts) > 5:
+                extra = f" (+{len(contacts) - 5} more)"
+            logger.info("FootFix '%s': intervals=%s%s", foot_name, abs_intervals, extra)
+
+            right_axis, forward_axis = self.root_processor.get_horizontal_axes()
+            pre_drift = []
+            for s, e in contacts:
+                lock = foot_positions[s]
+                segment = foot_positions[s : e + 1]
+                dx = segment[:, right_axis] - lock[right_axis]
+                dz = segment[:, forward_axis] - lock[forward_axis]
+                pre_drift.append(float(np.max(np.sqrt(dx * dx + dz * dz))))
+            logger.info(
+                "FootFix '%s': pre_clamp horizontal drift max=%.3f",
+                foot_name,
+                float(max(pre_drift)) if pre_drift else 0.0,
+            )
+
+        # Use world-space clamping to avoid bone hierarchy collapse
+        if hasattr(self.adapter, 'clamp_node_to_ground'):
+            self.adapter.clamp_node_to_ground(foot_name, contacts, ground_height=ground_height)
+            if toe_name:
+                self.adapter.clamp_node_to_ground(toe_name, contacts, ground_height=ground_height)
+        else:
+            # Fallback to legacy method (may cause overlap issues)
+            self.apply_stance_correction(
+                take_name, foot_name, contacts, ground_height=ground_height
+            )
+            if toe_name:
+                self.apply_stance_correction(
+                    take_name, toe_name, contacts, ground_height=ground_height
+                )
+
+        if contacts:
+            post_positions = self._get_world_positions(foot_name, start_frame, end_frame)
+            if len(post_positions) == len(foot_positions):
+                right_axis, forward_axis = self.root_processor.get_horizontal_axes()
+                post_drift = []
+                for s, e in contacts:
+                    lock = post_positions[s]
+                    segment = post_positions[s : e + 1]
+                    dx = segment[:, right_axis] - lock[right_axis]
+                    dz = segment[:, forward_axis] - lock[forward_axis]
+                    post_drift.append(float(np.max(np.sqrt(dx * dx + dz * dz))))
+                logger.info(
+                    "FootFix '%s': post_clamp horizontal drift max=%.3f",
+                    foot_name,
+                    float(max(post_drift)) if post_drift else 0.0,
+                )
 
         return contacts
 
@@ -477,6 +677,88 @@ class LoopProcessorService:
         for idx in range(1, len(positions)):
             delta = positions[idx] - positions[idx - 1]
             speeds.append(float(np.linalg.norm(delta)))
+        return speeds
+
+    def _compute_contact_metric(
+        self,
+        positions: np.ndarray,
+        root_velocity: Optional[np.ndarray] = None,
+    ) -> List[float]:
+        """
+        For root-motion (root_velocity None): use world speed magnitude.
+        For in-place: use relative horizontal acceleration (sliding can be constant speed).
+        """
+        if len(positions) == 0:
+            return []
+        if root_velocity is None or root_velocity.shape[1] < 3:
+            return self._compute_speeds(positions)
+
+        velocity = self._compute_relative_horizontal_velocity(positions, root_velocity)
+        if len(velocity) == 0:
+            return []
+
+        accelerations = [0.0]
+        for idx in range(1, len(velocity)):
+            delta = velocity[idx] - velocity[idx - 1]
+            accelerations.append(float(np.linalg.norm(delta)))
+        return accelerations
+
+    @staticmethod
+    def _resample_vectors(vectors: Optional[np.ndarray], target_len: int) -> Optional[np.ndarray]:
+        if vectors is None or target_len <= 0:
+            return None
+        if len(vectors) == target_len:
+            return vectors
+        src_t = np.linspace(0.0, 1.0, len(vectors))
+        dst_t = np.linspace(0.0, 1.0, target_len)
+        resampled = np.zeros((target_len, vectors.shape[1]))
+        for col in range(vectors.shape[1]):
+            resampled[:, col] = np.interp(dst_t, src_t, vectors[:, col])
+        return resampled
+
+    def _compute_root_velocity(self, trajectory: Optional[np.ndarray]) -> Optional[np.ndarray]:
+        if trajectory is None or len(trajectory) < 2 or trajectory.shape[1] < 3:
+            return None
+        positions = trajectory[:, :3]
+        velocity = np.zeros_like(positions)
+        velocity[1:] = positions[1:] - positions[:-1]
+        velocity[0] = velocity[1]
+        return velocity
+
+    def _compute_relative_horizontal_velocity(
+        self,
+        positions: np.ndarray,
+        root_velocity: np.ndarray,
+    ) -> np.ndarray:
+        root_velocity = self._resample_vectors(root_velocity, len(positions))
+        if root_velocity is None:
+            return np.zeros((len(positions), 2), dtype=float)
+
+        right_axis, forward_axis = self.root_processor.get_horizontal_axes()
+        velocity = np.zeros((len(positions), 2), dtype=float)
+        for idx in range(1, len(positions)):
+            delta = positions[idx] - positions[idx - 1]
+            delta[right_axis] += root_velocity[idx, right_axis]
+            delta[forward_axis] += root_velocity[idx, forward_axis]
+            velocity[idx, 0] = float(delta[right_axis])
+            velocity[idx, 1] = float(delta[forward_axis])
+        return velocity
+
+    def _compute_relative_speeds(
+        self,
+        positions: np.ndarray,
+        root_velocity: Optional[np.ndarray] = None,
+    ) -> List[float]:
+        if len(positions) == 0:
+            return []
+        if root_velocity is None or root_velocity.shape[1] < 3:
+            return self._compute_speeds(positions)
+
+        velocity = self._compute_relative_horizontal_velocity(positions, root_velocity)
+        speeds = [0.0]
+        for idx in range(1, len(velocity)):
+            speed = float(np.linalg.norm(velocity[idx]))
+            speeds.append(speed)
         return speeds
 
     @staticmethod
@@ -575,7 +857,12 @@ class LoopProcessorService:
         # NOTE: process_in_place now LOCKS at frame 0, not resets to (0,0)
         #       DO NOT call reset_origin before this!
         if in_place:
+            self.processed_root_pre_inplace = trajectory.copy()
+            self.processed_in_place = True
             trajectory = self.root_processor.process_in_place(trajectory)
+        else:
+            self.processed_root_pre_inplace = None
+            self.processed_in_place = False
 
         if target_rot_y is not None:
             trajectory = self.root_processor.align_orientation(trajectory, target_rot_y=target_rot_y)
@@ -592,6 +879,15 @@ class LoopProcessorService:
         in_place: bool = True,
         use_cycle_detection: bool = True,
         target_rot_y: Optional[float] = None,
+        left_foot: Optional[str] = None,
+        right_foot: Optional[str] = None,
+        left_toe: Optional[str] = None,
+        right_toe: Optional[str] = None,
+        enable_foot_fix: bool = True,
+        ground_height: float = 0.0,
+        contact_height_threshold: float = 2.0,
+        contact_speed_threshold: float = 0.5,
+        contact_min_span: int = 3,
     ) -> dict:
         """
         Create a seamless looping animation for THE ENTIRE HIERARCHY.
@@ -610,6 +906,13 @@ class LoopProcessorService:
             in_place: Whether to lock root XZ
             use_cycle_detection: If True and frames are None, detect cycle
             target_rot_y: If set, offset root rotation Y so frame 0 equals this value
+            left_foot/right_foot: Foot bone names for contact detection
+            left_toe/right_toe: Toe bone names for contact detection
+            enable_foot_fix: If True, compute and store contact intervals
+            ground_height: Ground plane height for contact detection
+            contact_height_threshold: Max height to consider contact
+            contact_speed_threshold: Max speed/accel to consider contact
+            contact_min_span: Minimum frame span for contact
             
         Returns:
             Dictionary mapping bone names to processed trajectories
@@ -631,6 +934,53 @@ class LoopProcessorService:
         
         self.best_loop_frame = loop_frame
         self.loop_start_frame = start_frame
+
+        self.processed_contacts_abs = {}
+        self.processed_contact_source_fps = None
+
+        source_fps = None
+        if hasattr(self.adapter, "get_current_fps"):
+            try:
+                source_fps = self.adapter.get_current_fps()
+            except Exception:
+                source_fps = None
+        self.processed_contact_source_fps = source_fps
+
+        if enable_foot_fix:
+            root_segment = None
+            if hasattr(self.adapter, "get_node_trajectory"):
+                try:
+                    root_segment = self.adapter.get_node_trajectory(
+                        root_name, start_frame=start_frame, end_frame=loop_frame
+                    )
+                except Exception:
+                    root_segment = None
+
+            if root_segment is None:
+                full_traj = self.adapter.get_root_trajectory(root_name)
+                start_idx = max(0, start_frame - anim_start)
+                end_idx = min(len(full_traj) - 1, loop_frame - anim_start)
+                root_segment = full_traj[start_idx : end_idx + 1]
+
+            root_velocity = self._compute_root_velocity(root_segment)
+
+            for foot_name, toe_name in ((left_foot, left_toe), (right_foot, right_toe)):
+                if not foot_name:
+                    continue
+                contacts = self._compute_contact_intervals_for_foot(
+                    foot_name,
+                    toe_name,
+                    start_frame,
+                    loop_frame,
+                    ground_height,
+                    contact_height_threshold,
+                    contact_speed_threshold,
+                    contact_min_span,
+                    root_velocity,
+                )
+                self.processed_contacts_abs[foot_name] = [
+                    (start_frame + s, start_frame + e) for (s, e) in contacts
+                ]
         
         # Phase 2: Get all bones in hierarchy
         if hasattr(self.adapter, 'get_hierarchy_nodes'):
@@ -642,6 +992,8 @@ class LoopProcessorService:
         
         # Phase 3: Process each bone
         self.processed_data = {}
+        self.processed_root_pre_inplace = None
+        self.processed_in_place = in_place
         
         for i, bone_name in enumerate(bone_names):
             try:
@@ -664,6 +1016,9 @@ class LoopProcessorService:
                 
                 # Apply in-place ONLY to root
                 is_root = (bone_name == bone_names[0])
+                if is_root:
+                    self.processed_root_pre_inplace = trajectory.copy()
+
                 if in_place and is_root:
                     trajectory = self.root_processor.process_in_place(trajectory)
 
