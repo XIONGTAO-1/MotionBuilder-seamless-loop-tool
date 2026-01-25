@@ -50,7 +50,7 @@ class SeamlessLoopToolWindow(QtBaseWidget):
     4. Click "Apply" to write changes back
     """
 
-    WINDOW_TITLE = "Seamless Loop Tool v1.8"
+    WINDOW_TITLE = "Seamless Loop Tool v2.1"
     
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -80,11 +80,10 @@ class SeamlessLoopToolWindow(QtBaseWidget):
         layout.setSpacing(10)
         layout.setContentsMargins(15, 15, 15, 15)
         
-        # Title
-        title = QLabel(self.WINDOW_TITLE)
-        title.setStyleSheet("font-size: 14px; font-weight: bold;")
-        layout.addWidget(title)
-        
+        # Bone Settings Group
+        bone_group = QGroupBox("Bone Settings")
+        bone_layout = QtWidgets.QVBoxLayout(bone_group)
+
         # Root Bone Input
         root_layout = QtWidgets.QHBoxLayout()
         root_layout.addWidget(QLabel("Root Bone:"))
@@ -94,7 +93,7 @@ class SeamlessLoopToolWindow(QtBaseWidget):
         self.btn_get_selected.setToolTip("Get bone name from Navigator selection")
         self.btn_get_selected.clicked.connect(self._on_get_selected_clicked)
         root_layout.addWidget(self.btn_get_selected)
-        layout.addLayout(root_layout)
+        bone_layout.addLayout(root_layout)
 
         # Foot/Toe Bone Inputs
         self.edit_left_foot = QtWidgets.QLineEdit(self.left_foot_name)
@@ -108,7 +107,7 @@ class SeamlessLoopToolWindow(QtBaseWidget):
         btn_left_foot = QtWidgets.QPushButton("← Get Selected")
         btn_left_foot.clicked.connect(lambda: self._set_selected_to_edit(self.edit_left_foot, "Left Foot"))
         left_foot_layout.addWidget(btn_left_foot)
-        layout.addLayout(left_foot_layout)
+        bone_layout.addLayout(left_foot_layout)
 
         right_foot_layout = QtWidgets.QHBoxLayout()
         right_foot_layout.addWidget(QLabel("Right Foot:"))
@@ -116,7 +115,7 @@ class SeamlessLoopToolWindow(QtBaseWidget):
         btn_right_foot = QtWidgets.QPushButton("← Get Selected")
         btn_right_foot.clicked.connect(lambda: self._set_selected_to_edit(self.edit_right_foot, "Right Foot"))
         right_foot_layout.addWidget(btn_right_foot)
-        layout.addLayout(right_foot_layout)
+        bone_layout.addLayout(right_foot_layout)
 
         left_toe_layout = QtWidgets.QHBoxLayout()
         left_toe_layout.addWidget(QLabel("Left Toe:"))
@@ -124,7 +123,7 @@ class SeamlessLoopToolWindow(QtBaseWidget):
         btn_left_toe = QtWidgets.QPushButton("← Get Selected")
         btn_left_toe.clicked.connect(lambda: self._set_selected_to_edit(self.edit_left_toe, "Left Toe"))
         left_toe_layout.addWidget(btn_left_toe)
-        layout.addLayout(left_toe_layout)
+        bone_layout.addLayout(left_toe_layout)
 
         right_toe_layout = QtWidgets.QHBoxLayout()
         right_toe_layout.addWidget(QLabel("Right Toe:"))
@@ -132,7 +131,39 @@ class SeamlessLoopToolWindow(QtBaseWidget):
         btn_right_toe = QtWidgets.QPushButton("← Get Selected")
         btn_right_toe.clicked.connect(lambda: self._set_selected_to_edit(self.edit_right_toe, "Right Toe"))
         right_toe_layout.addWidget(btn_right_toe)
-        layout.addLayout(right_toe_layout)
+        bone_layout.addLayout(right_toe_layout)
+
+        layout.addWidget(bone_group)
+
+        # Foot Contact Fix Group
+        foot_fix_group = QGroupBox("Foot Contact Fix")
+        foot_fix_layout = QFormLayout(foot_fix_group)
+
+        self.chk_enable_foot_fix = QtWidgets.QCheckBox("Enable Foot Fix")
+        self.chk_enable_foot_fix.setChecked(True)
+        foot_fix_layout.addRow(self.chk_enable_foot_fix)
+
+        self.spin_contact_height = QDoubleSpinBox()
+        self.spin_contact_height.setRange(0.0, 50.0)
+        self.spin_contact_height.setSingleStep(0.5)
+        self.spin_contact_height.setValue(2.0)
+
+        self.spin_contact_speed = QDoubleSpinBox()
+        self.spin_contact_speed.setRange(0.0, 10.0)
+        self.spin_contact_speed.setSingleStep(0.1)
+        self.spin_contact_speed.setValue(0.5)
+
+        self.spin_contact_min_span = QSpinBox()
+        self.spin_contact_min_span.setRange(1, 30)
+        self.spin_contact_min_span.setValue(3)
+
+        foot_fix_layout.addRow(QLabel("Height Threshold"), self.spin_contact_height)
+        foot_fix_layout.addRow(QLabel("Speed Threshold"), self.spin_contact_speed)
+        foot_fix_layout.addRow(QLabel("Min Frame Span"), self.spin_contact_min_span)
+
+        self.chk_enable_foot_fix.stateChanged.connect(self._on_foot_fix_toggled)
+
+        layout.addWidget(foot_fix_group)
         
         # Blend Frames Input
         blend_layout = QtWidgets.QHBoxLayout()
@@ -272,6 +303,10 @@ class SeamlessLoopToolWindow(QtBaseWidget):
         self.right_toe_name = self.edit_right_toe.text().strip() or "RightToeBase"
         self.blend_frames = self.edit_blend.value()
         self.target_rot_y = self.spin_target_rot_y.value()
+        self.enable_foot_fix = self.chk_enable_foot_fix.isChecked()
+        self.contact_height_threshold = self.spin_contact_height.value()
+        self.contact_speed_threshold = self.spin_contact_speed.value()
+        self.contact_min_span = self.spin_contact_min_span.value()
 
     def _get_export_fps(self) -> float:
         data = self.combo_export_fps.currentData()
@@ -302,6 +337,13 @@ class SeamlessLoopToolWindow(QtBaseWidget):
                 self._set_status("No model selected in Navigator")
         except Exception as e:
             self._set_status(f"Error: {e}")
+
+    def _on_foot_fix_toggled(self, state):
+        """Enable/disable foot fix threshold controls."""
+        enabled = state == QtCore.Qt.Checked
+        self.spin_contact_height.setEnabled(enabled)
+        self.spin_contact_speed.setEnabled(enabled)
+        self.spin_contact_min_span.setEnabled(enabled)
 
     def _on_get_selected_clicked(self):
         """Get selected bone from Navigator and fill in Root Bone field."""
@@ -410,6 +452,10 @@ class SeamlessLoopToolWindow(QtBaseWidget):
                     left_toe=self.left_toe_name,
                     right_toe=self.right_toe_name,
                     ground_height=0.0,
+                    enable_foot_fix=self.enable_foot_fix,
+                    contact_height_threshold=self.contact_height_threshold,
+                    contact_speed_threshold=self.contact_speed_threshold,
+                    contact_min_span=self.contact_min_span,
                 )
                 self._set_status("Hierarchy applied to scene!")
             else:

@@ -402,3 +402,49 @@ class TestLoopProcessorService:
 
         _, updated_translations, _ = adapter.get_mock_trajectory(take, foot)
         assert updated_translations[0:5] == [(0, 0.0, 0)] * 5
+
+    def test_apply_changes_hierarchy_skips_foot_fix_when_disabled(self):
+        """apply_changes_hierarchy should skip foot fix when enable_foot_fix=False."""
+        class FakeAdapter:
+            def __init__(self):
+                self.foot_fix_called = False
+                self.written_nodes = []
+
+            def clear_all_animation(self, root_name="Hips"):
+                pass
+
+            def set_node_trajectory(self, node_name, trajectory, start_frame=0):
+                self.written_nodes.append(node_name)
+
+            def get_frame_range(self):
+                return (0, 9)
+
+            def get_world_translations(self, node_name, start_frame=0, end_frame=9):
+                return [(0, 0.5, 0)] * 10
+
+            def get_node_trajectory(self, node_name, start_frame=0, end_frame=9):
+                return np.zeros((10, 6))
+
+        adapter = FakeAdapter()
+        service = LoopProcessorService(adapter)
+        service.processed_data = {"Hips": np.zeros((10, 6))}
+        service.processed_trajectory = np.zeros((10, 6))
+
+        original_fix = service.apply_foot_contact_fix
+
+        def tracking_fix(*args, **kwargs):
+            adapter.foot_fix_called = True
+            return original_fix(*args, **kwargs)
+
+        service.apply_foot_contact_fix = tracking_fix
+
+        service.apply_changes_hierarchy(
+            preserve_original=False,
+            left_foot="LeftFoot",
+            right_foot="RightFoot",
+            enable_foot_fix=False,
+        )
+
+        assert adapter.foot_fix_called is False
+        assert "Hips" in adapter.written_nodes
+

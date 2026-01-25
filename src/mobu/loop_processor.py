@@ -267,6 +267,7 @@ class LoopProcessorService:
         left_toe: Optional[str] = None,
         right_toe: Optional[str] = None,
         ground_height: float = 0.0,
+        enable_foot_fix: bool = True,
         contact_height_threshold: float = 2.0,
         contact_speed_threshold: float = 0.5,
         contact_min_span: int = 3,
@@ -283,6 +284,7 @@ class LoopProcessorService:
             left_foot/right_foot: Foot bone names for contact correction
             left_toe/right_toe: Toe bone names for contact correction
             ground_height: Ground plane height (default 0.0)
+            enable_foot_fix: If True, apply foot contact correction
             contact_height_threshold: Max height to consider contact
             contact_speed_threshold: Max speed to consider contact
             contact_min_span: Minimum frame span for contact
@@ -332,17 +334,18 @@ class LoopProcessorService:
             except Exception:
                 take_name = None
 
-        for foot_name, toe_name in ((left_foot, left_toe), (right_foot, right_toe)):
-            if foot_name:
-                self.apply_foot_contact_fix(
-                    take_name or "",
-                    foot_name,
-                    toe_name,
-                    ground_height=ground_height,
-                    height_threshold=contact_height_threshold,
-                    speed_threshold=contact_speed_threshold,
-                    min_span=contact_min_span,
-                )
+        if enable_foot_fix:
+            for foot_name, toe_name in ((left_foot, left_toe), (right_foot, right_toe)):
+                if foot_name:
+                    self.apply_foot_contact_fix(
+                        take_name or "",
+                        foot_name,
+                        toe_name,
+                        ground_height=ground_height,
+                        height_threshold=contact_height_threshold,
+                        speed_threshold=contact_speed_threshold,
+                        min_span=contact_min_span,
+                    )
         
         print(f"[SeamlessLoopTool] Wrote {bone_count} bones to new Take")
 
