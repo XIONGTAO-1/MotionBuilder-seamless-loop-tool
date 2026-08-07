@@ -17,6 +17,217 @@ from mobu.adapter import MockMoBuAdapter
 import mobu.adapter as adapter_module
 
 
+def test_get_current_character_uses_application_selection(monkeypatch):
+    selected_character = object()
+
+    class FakeApplication:
+        CurrentCharacter = selected_character
+
+    monkeypatch.setattr(adapter_module, "FBApplication", FakeApplication)
+    adapter = adapter_module.MoBuAdapter.__new__(adapter_module.MoBuAdapter)
+
+    assert adapter.get_current_character() is selected_character
+
+
+def test_get_current_character_returns_none_without_application_api(monkeypatch):
+    monkeypatch.setattr(adapter_module, "FBApplication", None)
+    adapter = adapter_module.MoBuAdapter.__new__(adapter_module.MoBuAdapter)
+
+    assert adapter.get_current_character() is None
+
+
+def test_get_current_character_returns_none_when_application_lookup_fails(monkeypatch):
+    def failing_application():
+        raise RuntimeError("application unavailable")
+
+    monkeypatch.setattr(adapter_module, "FBApplication", failing_application)
+    adapter = adapter_module.MoBuAdapter.__new__(adapter_module.MoBuAdapter)
+
+    assert adapter.get_current_character() is None
+
+
+class TestMoBuAdapterModelResolution:
+    class FakeTime:
+        def __init__(self, _h=0, _m=0, _s=0, frame=0, *_args):
+            self._frame = frame
+
+        def GetFrame(self):
+            return self._frame
+
+    class FakeFCurve:
+        def __init__(self, value=0.0):
+            self.value = float(value)
+            self.key_add_calls = []
+
+        def Evaluate(self, _time):
+            return self.value
+
+        def KeyAdd(self, time, value):
+            self.key_add_calls.append((time.GetFrame(), value))
+            return len(self.key_add_calls) - 1
+
+        def EditClear(self):
+            self.key_add_calls.clear()
+
+    class FakeNode:
+        def __init__(self, value=0.0):
+            self.FCurve = TestMoBuAdapterModelResolution.FakeFCurve(value)
+
+    class FakeAnimationNode:
+        def __init__(self, values):
+            self.Nodes = [
+                TestMoBuAdapterModelResolution.FakeNode(value)
+                for value in values
+            ]
+
+    class FakeProperty:
+        def __init__(self, values):
+            self.node = TestMoBuAdapterModelResolution.FakeAnimationNode(values)
+
+        def SetAnimated(self, _value):
+            pass
+
+        def GetAnimationNode(self):
+            return self.node
+
+    class FakeModel:
+        def __init__(self, name, long_name, rotation_values=(0.0, 0.0, 0.0)):
+            self.Name = name
+            self.LongName = long_name
+            self.LabelName = name
+            self.Children = []
+            self.Translation = TestMoBuAdapterModelResolution.FakeProperty(
+                (0.0, 0.0, 0.0)
+            )
+            self.Rotation = TestMoBuAdapterModelResolution.FakeProperty(
+                rotation_values
+            )
+
+    def make_adapter(self, monkeypatch, roots):
+        scene_root = self.FakeModel("Scene", "Scene")
+        scene_root.Children = list(roots)
+        scene = type("FakeScene", (), {"RootModel": scene_root})()
+        system = type("FakeSystem", (), {"Scene": scene, "CurrentTake": object()})()
+        models = []
+
+        def collect(model):
+            models.append(model)
+            for child in model.Children:
+                collect(child)
+
+        for root in roots:
+            collect(root)
+        by_long_name = {model.LongName: model for model in models}
+
+        monkeypatch.setattr(
+            adapter_module,
+            "FBFindModelByLabelName",
+            lambda name: by_long_name.get(name),
+        )
+        monkeypatch.setattr(adapter_module, "FBFindModelByName", lambda _name: None)
+        monkeypatch.setattr(adapter_module, "FBTime", self.FakeTime)
+        adapter = adapter_module.MoBuAdapter.__new__(adapter_module.MoBuAdapter)
+        adapter._system = system
+        adapter._player = None
+        return adapter
+
+    def make_mixamo_hierarchy(self):
+        hips = self.FakeModel(
+            "Hips",
+            "mixamorig:Hips",
+            rotation_values=(100.0, 101.0, 102.0),
+        )
+        upper_leg = self.FakeModel(
+            "LeftUpLeg",
+            "mixamorig:LeftUpLeg",
+            rotation_values=(10.0, 11.0, 12.0),
+        )
+        lower_leg = self.FakeModel(
+            "LeftLeg",
+            "mixamorig:LeftLeg",
+            rotation_values=(20.0, 21.0, 22.0),
+        )
+        hips.Children = [upper_leg]
+        upper_leg.Children = [lower_leg]
+        return hips, upper_leg, lower_leg
+
+    def test_hierarchy_ids_preserve_namespace(self, monkeypatch):
+        hips, _upper_leg, _lower_leg = self.make_mixamo_hierarchy()
+        adapter = self.make_adapter(monkeypatch, [hips])
+
+        assert adapter.get_hierarchy_nodes("mixamorig:Hips") == [
+            "mixamorig:Hips",
+            "mixamorig:LeftUpLeg",
+            "mixamorig:LeftLeg",
+        ]
+
+    def test_namespaced_hierarchy_samples_the_requested_child(self, monkeypatch):
+        hips, _upper_leg, _lower_leg = self.make_mixamo_hierarchy()
+        adapter = self.make_adapter(monkeypatch, [hips])
+
+        child_name = adapter.get_hierarchy_nodes("mixamorig:Hips")[-1]
+        trajectory = adapter.get_node_trajectory(child_name, 0, 0)
+
+        assert trajectory[0, 3:6].tolist() == [20.0, 21.0, 22.0]
+
+    def test_missing_child_never_writes_to_hips(self, monkeypatch):
+        hips, _upper_leg, _lower_leg = self.make_mixamo_hierarchy()
+        adapter = self.make_adapter(monkeypatch, [hips])
+        trajectory = np.array([[0.0, 0.0, 0.0, 1.0, 2.0, 3.0]])
+
+        with pytest.raises(ValueError, match="not found"):
+            adapter.set_node_trajectory(
+                "mixamorig:MissingBone",
+                trajectory,
+                include_translation=False,
+            )
+
+        assert all(
+            not node.FCurve.key_add_calls
+            for node in hips.Rotation.GetAnimationNode().Nodes
+        )
+
+    def test_unqualified_duplicate_name_is_rejected(self, monkeypatch):
+        first = self.FakeModel("LeftLeg", "hero:LeftLeg")
+        second = self.FakeModel("LeftLeg", "enemy:LeftLeg")
+        adapter = self.make_adapter(monkeypatch, [first, second])
+
+        with pytest.raises(ValueError, match="Ambiguous"):
+            adapter.resolve_model("LeftLeg")
+
+        assert adapter.resolve_model("hero:LeftLeg") is first
+        assert adapter.resolve_model("enemy:LeftLeg") is second
+
+    def test_validation_rejects_two_names_for_the_same_model(self, monkeypatch):
+        leg = self.FakeModel("LeftLeg", "mixamorig:LeftLeg")
+        adapter = self.make_adapter(monkeypatch, [leg])
+
+        with pytest.raises(ValueError, match="same model"):
+            adapter.validate_node_names(["mixamorig:LeftLeg", "LeftLeg"])
+
+    def test_unqualified_root_is_rejected_when_two_characters_match(self, monkeypatch):
+        first = self.FakeModel("Hips", "hero:Hips")
+        second = self.FakeModel("Hips", "enemy:Hips")
+        adapter = self.make_adapter(monkeypatch, [first, second])
+
+        with pytest.raises(ValueError, match="Ambiguous"):
+            adapter.find_root_bone("Hips")
+
+    def test_same_long_name_from_two_python_wrappers_is_one_model(self, monkeypatch):
+        scene_model = self.FakeModel("LeftLeg", "mixamorig:LeftLeg")
+        lookup_wrapper = self.FakeModel("LeftLeg", "mixamorig:LeftLeg")
+        adapter = self.make_adapter(monkeypatch, [scene_model])
+        monkeypatch.setattr(
+            adapter_module,
+            "FBFindModelByLabelName",
+            lambda _name: lookup_wrapper,
+        )
+
+        resolved = adapter.resolve_model("mixamorig:LeftLeg")
+
+        assert resolved.LongName == "mixamorig:LeftLeg"
+
+
 class TestMockMoBuAdapter:
     """Test suite for MockMoBuAdapter (allows testing outside MoBu)."""
 
@@ -177,6 +388,9 @@ class TestMoBuAdapterSetRootTrajectory:
 
         class FakeModel:
             def __init__(self):
+                self.Name = "Hips"
+                self.LongName = "Hips"
+                self.LabelName = "Hips"
                 self.Translation = FakeProperty()
                 self.Rotation = FakeProperty()
 
@@ -239,6 +453,146 @@ class TestMoBuAdapterSetRootTrajectory:
         assert interp_calls
         assert tangent_calls
 
+    def test_set_node_trajectory_can_leave_child_translation_untouched(self, monkeypatch):
+        class FakeTime:
+            def __init__(self, _h=0, _m=0, _s=0, frame=0):
+                self._frame = frame
+
+            def GetFrame(self):
+                return self._frame
+
+        class FakeFCurve:
+            def __init__(self):
+                self.key_add_calls = []
+                self.edit_clear_calls = 0
+
+            def KeyAdd(self, time, value):
+                self.key_add_calls.append((time.GetFrame(), value))
+                return len(self.key_add_calls) - 1
+
+            def EditClear(self):
+                self.edit_clear_calls += 1
+
+        class FakeNode:
+            def __init__(self):
+                self.FCurve = FakeFCurve()
+
+        class FakeAnimNode:
+            def __init__(self):
+                self.Nodes = [FakeNode(), FakeNode(), FakeNode()]
+
+        class FakeProperty:
+            def __init__(self):
+                self.node = FakeAnimNode()
+                self.set_animated_calls = []
+
+            def SetAnimated(self, value):
+                self.set_animated_calls.append(value)
+
+            def GetAnimationNode(self):
+                return self.node
+
+        class FakeModel:
+            def __init__(self):
+                self.Translation = FakeProperty()
+                self.Rotation = FakeProperty()
+
+        class FakeSystem:
+            def __init__(self):
+                self.CurrentTake = object()
+
+        model = FakeModel()
+        adapter = object.__new__(adapter_module.MoBuAdapter)
+        adapter._system = FakeSystem()
+        adapter.resolve_model = lambda _name: model
+
+        monkeypatch.setattr(adapter_module, "FBTime", FakeTime)
+
+        trajectory = np.array([
+            [0.1, 0.2, 0.3, 10.0, 20.0, 30.0],
+            [0.4, 0.5, 0.6, 40.0, 50.0, 60.0],
+        ])
+
+        adapter.set_node_trajectory(
+            "LeftLeg",
+            trajectory,
+            include_translation=False,
+        )
+
+        assert model.Translation.set_animated_calls == []
+        assert all(not node.FCurve.key_add_calls for node in model.Translation.node.Nodes)
+        assert all(node.FCurve.edit_clear_calls == 0 for node in model.Translation.node.Nodes)
+        assert model.Rotation.node.Nodes[0].FCurve.key_add_calls == [
+            (0, 10.0),
+            (1, 40.0),
+        ]
+
+
+class TestMoBuAdapterGetNodeTrajectory:
+    def test_samples_fcurves_without_seeking_or_evaluating(self, monkeypatch):
+        """Hierarchy processing should not evaluate the whole scene per frame."""
+
+        class FakeTime:
+            def __init__(self, _h=0, _m=0, _s=0, frame=0, *_args):
+                self._frame = frame
+
+            def GetFrame(self):
+                return self._frame
+
+        class FakeFCurve:
+            def __init__(self, offset):
+                self.offset = offset
+
+            def Evaluate(self, time):
+                return self.offset + time.GetFrame()
+
+        class FakeNode:
+            def __init__(self, offset):
+                self.FCurve = FakeFCurve(offset)
+
+        class FakeAnimationNode:
+            def __init__(self, offsets):
+                self.Nodes = [FakeNode(offset) for offset in offsets]
+
+        class FakeProperty:
+            def __init__(self, offsets):
+                self.node = FakeAnimationNode(offsets)
+
+            def GetAnimationNode(self):
+                return self.node
+
+        class FakeModel:
+            Name = "LeftLeg"
+            LongName = "mixamorig:LeftLeg"
+            LabelName = "mixamorig:LeftLeg"
+            Translation = FakeProperty((1.0, 10.0, 20.0))
+            Rotation = FakeProperty((30.0, 40.0, 50.0))
+
+            def GetVector(self, *_args):
+                pytest.fail("hierarchy sampling must read FCurves")
+
+        fake_model = FakeModel()
+        monkeypatch.setattr(adapter_module, "FBTime", FakeTime)
+
+        adapter = object.__new__(adapter_module.MoBuAdapter)
+        adapter.resolve_model = lambda _name: fake_model
+        adapter._set_local_time = lambda _time: pytest.fail(
+            "hierarchy sampling must not seek the timeline"
+        )
+        adapter._evaluate_scene = lambda: pytest.fail(
+            "hierarchy sampling must not evaluate the scene"
+        )
+        trajectory = adapter.get_node_trajectory("mixamorig:LeftLeg", 0, 2)
+
+        np.testing.assert_allclose(
+            trajectory,
+            [
+                [1.0, 10.0, 20.0, 30.0, 40.0, 50.0],
+                [2.0, 11.0, 21.0, 31.0, 41.0, 51.0],
+                [3.0, 12.0, 22.0, 32.0, 42.0, 52.0],
+            ],
+        )
+
 
 class TestMoBuAdapterWorldTranslations:
     """Tests for world-translation sampling with GetMatrix API differences."""
@@ -282,6 +636,9 @@ class TestMoBuAdapterWorldTranslations:
 
         class FakeModel:
             def __init__(self):
+                self.Name = "Hips"
+                self.LongName = "Hips"
+                self.LabelName = "Hips"
                 self.Translation = object()
 
             def GetMatrix(self, matrix, _xform_type=None, _world=True):
@@ -353,6 +710,9 @@ class TestMoBuAdapterWorldTranslations:
 
         class FakeModel:
             def __init__(self):
+                self.Name = "Hips"
+                self.LongName = "Hips"
+                self.LabelName = "Hips"
                 self.Translation = object()
 
             def GetMatrix(self, matrix, _xform_type=None, _world=True):

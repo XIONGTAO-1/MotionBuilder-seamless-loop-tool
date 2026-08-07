@@ -303,7 +303,13 @@ class TestLoopProcessorService:
             def get_current_fps(self):
                 return 30.0
 
-            def set_node_trajectory(self, node_name, trajectory, start_frame=0):
+            def set_node_trajectory(
+                self,
+                node_name,
+                trajectory,
+                start_frame=0,
+                include_translation=True,
+            ):
                 self.lengths[node_name] = len(trajectory)
 
         adapter = FakeAdapter()
@@ -329,7 +335,13 @@ class TestLoopProcessorService:
             def clear_all_animation(self, root_name="Hips"):
                 self.cleared = True
 
-            def set_node_trajectory(self, node_name, trajectory, start_frame=0):
+            def set_node_trajectory(
+                self,
+                node_name,
+                trajectory,
+                start_frame=0,
+                include_translation=True,
+            ):
                 self.written_nodes.append(node_name)
 
             def set_transport_fps(self, target_fps):
@@ -345,6 +357,217 @@ class TestLoopProcessorService:
         assert adapter.transport_fps == 90.0
         assert adapter.cleared is True
         assert adapter.written_nodes == ["Hips"]
+
+    def test_apply_changes_hierarchy_writes_translation_only_for_root(self):
+        """Child joints must not receive baked translation curves."""
+        class FakeAdapter:
+            def __init__(self):
+                self.write_policies = {}
+
+            def clear_all_animation(self, root_name="Hips"):
+                pass
+
+            def set_node_trajectory(
+                self,
+                node_name,
+                trajectory,
+                start_frame=0,
+                include_translation=True,
+            ):
+                self.write_policies[node_name] = include_translation
+
+        adapter = FakeAdapter()
+        service = LoopProcessorService(adapter)
+        trajectory = np.zeros((10, 6))
+        service.processed_data = {
+            "Hips": trajectory,
+            "LeftLeg": trajectory,
+            "LeftFoot": trajectory,
+        }
+        service.processed_trajectory = trajectory
+
+        service.apply_changes_hierarchy(
+            root_name="Hips",
+            preserve_original=False,
+            enable_foot_fix=False,
+        )
+
+        assert adapter.write_policies == {
+            "Hips": True,
+            "LeftLeg": False,
+            "LeftFoot": False,
+        }
+
+    def test_apply_changes_hierarchy_recognizes_namespaced_root(self):
+        class FakeAdapter:
+            def __init__(self):
+                self.write_policies = {}
+
+            def clear_all_animation(self, root_name="Hips"):
+                pass
+
+            def set_node_trajectory(
+                self,
+                node_name,
+                trajectory,
+                start_frame=0,
+                include_translation=True,
+            ):
+                self.write_policies[node_name] = include_translation
+
+        adapter = FakeAdapter()
+        service = LoopProcessorService(adapter)
+        trajectory = np.zeros((10, 6))
+        service.processed_data = {
+            "mixamorig:Hips": trajectory,
+            "mixamorig:LeftLeg": trajectory,
+        }
+        service.processed_trajectory = trajectory
+
+        service.apply_changes_hierarchy(
+            root_name="Hips",
+            preserve_original=False,
+            enable_foot_fix=False,
+        )
+
+        assert adapter.write_policies == {
+            "mixamorig:Hips": True,
+            "mixamorig:LeftLeg": False,
+        }
+
+    def test_process_stores_namespaced_root_as_compatibility_trajectory(self):
+        class FakeAdapter:
+            def get_frame_range(self):
+                return (0, 2)
+
+            def get_current_fps(self):
+                return 30.0
+
+            def get_hierarchy_nodes(self, root_name="Hips"):
+                return ["mixamorig:Hips", "mixamorig:LeftLeg"]
+
+            def get_node_trajectory(self, node_name, start_frame=0, end_frame=2):
+                value = 1.0 if node_name in ("Hips", "mixamorig:Hips") else 2.0
+                return np.full((end_frame - start_frame + 1, 6), value)
+
+        service = LoopProcessorService(FakeAdapter())
+
+        service.create_seamless_loop_hierarchy(
+            root_name="Hips",
+            start_frame=0,
+            loop_frame=2,
+            blend_frames=1,
+            in_place=False,
+            enable_foot_fix=False,
+        )
+
+        np.testing.assert_array_equal(
+            service.processed_trajectory,
+            service.processed_data["mixamorig:Hips"],
+        )
+
+    def test_apply_preflight_fails_before_creating_or_clearing_take(self):
+        class FakeAdapter:
+            def __init__(self):
+                self.take_created = False
+                self.animation_cleared = False
+                self.written_nodes = []
+
+            def validate_node_names(self, node_names):
+                assert list(node_names) == [
+                    "mixamorig:Hips",
+                    "mixamorig:LeftLeg",
+                ]
+                raise ValueError("Bone 'mixamorig:LeftLeg' not found in scene")
+
+            def get_current_take_name(self):
+                return "Walk"
+
+            def create_clean_take(self, suffix="_InPlace", root_name="Hips"):
+                self.take_created = True
+
+            def clear_all_animation(self, root_name="Hips"):
+                self.animation_cleared = True
+
+            def set_node_trajectory(
+                self,
+                node_name,
+                trajectory,
+                start_frame=0,
+                include_translation=True,
+            ):
+                self.written_nodes.append(node_name)
+
+        adapter = FakeAdapter()
+        service = LoopProcessorService(adapter)
+        trajectory = np.zeros((10, 6))
+        service.processed_data = {
+            "mixamorig:Hips": trajectory,
+            "mixamorig:LeftLeg": trajectory,
+        }
+
+        with pytest.raises(ValueError, match="not found"):
+            service.apply_changes_hierarchy(
+                root_name="mixamorig:Hips",
+                preserve_original=True,
+                enable_foot_fix=False,
+            )
+
+        assert adapter.take_created is False
+        assert adapter.animation_cleared is False
+        assert adapter.written_nodes == []
+
+    def test_apply_preflight_allows_unique_foot_alias_of_processed_node(self):
+        class FakeAdapter:
+            def __init__(self):
+                self.events = []
+
+            def validate_node_names(self, node_names):
+                assert list(node_names) == [
+                    "mixamorig:Hips",
+                    "mixamorig:LeftFoot",
+                ]
+                self.events.append("validated-hierarchy")
+
+            def resolve_model(self, node_name):
+                assert node_name == "LeftFoot"
+                self.events.append("resolved-foot")
+                return object()
+
+            def clear_all_animation(self, root_name="Hips"):
+                self.events.append("cleared")
+
+            def set_node_trajectory(
+                self,
+                node_name,
+                trajectory,
+                start_frame=0,
+                include_translation=True,
+            ):
+                self.events.append(f"wrote:{node_name}")
+
+        adapter = FakeAdapter()
+        service = LoopProcessorService(adapter)
+        trajectory = np.zeros((10, 6))
+        service.processed_data = {
+            "mixamorig:Hips": trajectory,
+            "mixamorig:LeftFoot": trajectory,
+        }
+
+        service.apply_changes_hierarchy(
+            root_name="mixamorig:Hips",
+            preserve_original=False,
+            left_foot="LeftFoot",
+            enable_foot_fix=True,
+        )
+
+        assert adapter.events == [
+            "validated-hierarchy",
+            "resolved-foot",
+            "cleared",
+            "wrote:mixamorig:Hips",
+            "wrote:mixamorig:LeftFoot",
+        ]
 
     def test_detect_contact_intervals(self):
         service = LoopProcessorService(MockMoBuAdapter())
@@ -543,7 +766,13 @@ class TestLoopProcessorService:
             def clear_all_animation(self, root_name="Hips"):
                 pass
 
-            def set_node_trajectory(self, node_name, trajectory, start_frame=0):
+            def set_node_trajectory(
+                self,
+                node_name,
+                trajectory,
+                start_frame=0,
+                include_translation=True,
+            ):
                 self.written_nodes.append(node_name)
 
             def get_frame_range(self):

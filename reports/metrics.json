@@ -1,0 +1,188 @@
+{
+  "best_cross_validation_f1_macro": 0.8659595395924036,
+  "best_parameters": {
+    "max_depth": 8,
+    "max_features": 0.5,
+    "max_samples": 0.8,
+    "min_samples_leaf": 4,
+    "min_samples_split": 10,
+    "n_estimators": 400
+  },
+  "clip_level": {
+    "macro_f1": 0.9532390949806021,
+    "per_class": {
+      "other": {
+        "f1": 0.9763313609467456,
+        "precision": 0.9705882352941176,
+        "recall": 0.9821428571428571,
+        "support": 168
+      },
+      "run": {
+        "f1": 0.918918918918919,
+        "precision": 0.8947368421052632,
+        "recall": 0.9444444444444444,
+        "support": 18
+      },
+      "walk": {
+        "f1": 0.9644670050761421,
+        "precision": 0.979381443298969,
+        "recall": 0.95,
+        "support": 100
+      }
+    }
+  },
+  "deployment_status": "production",
+  "numpy_json_parity": {
+    "labels_identical": true,
+    "maximum_probability_error": 4.440892098500626e-16
+  },
+  "numpy_version": "2.4.6",
+  "other_subcategory_recall": {
+    "combat": {
+      "recall": 0.8076923076923077,
+      "support": 104
+    },
+    "dance": {
+      "recall": 0.3333333333333333,
+      "support": 27
+    },
+    "idle": {
+      "recall": 1.0,
+      "support": 26
+    },
+    "jump_acrobatic": {
+      "recall": 0.8272727272727273,
+      "support": 110
+    },
+    "unknown_mixed": {
+      "recall": 0.8705882352941177,
+      "support": 1955
+    }
+  },
+  "quality_gates": {
+    "macro_f1_at_least_0_70": true,
+    "run_precision_at_least_0_85": true,
+    "validation_has_all_classes": true,
+    "walk_precision_at_least_0_90": true
+  },
+  "quality_warnings": [],
+  "scikit_learn_version": "1.9.0",
+  "selected_class_counts": {
+    "other": 965,
+    "run": 262,
+    "walk": 631
+  },
+  "threshold_calibration": {
+    "class_counts": {
+      "other": 353,
+      "run": 75,
+      "walk": 255
+    },
+    "clip_count": 683,
+    "level": "clip",
+    "probability_source": "training_oof"
+  },
+  "threshold_selection": {
+    "run": {
+      "f0_5": 0.9029649595687331,
+      "precision": 0.9054054054054054,
+      "prediction_count": 74,
+      "quality_warning": null,
+      "recall": 0.8933333333333333,
+      "threshold": 0.48
+    },
+    "walk": {
+      "f0_5": 0.8918249380677127,
+      "precision": 0.9037656903765691,
+      "prediction_count": 239,
+      "quality_warning": null,
+      "recall": 0.8470588235294118,
+      "threshold": 0.5
+    }
+  },
+  "thresholds": {
+    "run": 0.48,
+    "walk": 0.5
+  },
+  "training_config": {
+    "cv_splits": 5,
+    "dataset_root": "/Users/tao1121/Desktop/\u6587\u732e/data/processed_amass_babel_router",
+    "max_windows_per_source_class": 10,
+    "python_version": "3.11.9",
+    "random_state": 42,
+    "scoring": "f1_macro",
+    "search_iterations": 30,
+    "search_space": {
+      "max_depth": [
+        8,
+        12,
+        16
+      ],
+      "max_features": [
+        "sqrt",
+        0.3,
+        0.5
+      ],
+      "max_samples": [
+        0.6,
+        0.8,
+        1.0
+      ],
+      "min_samples_leaf": [
+        1,
+        2,
+        4,
+        8
+      ],
+      "min_samples_split": [
+        2,
+        5,
+        10
+      ],
+      "n_estimators": [
+        200,
+        400,
+        600
+      ]
+    },
+    "target_fps": 30.0,
+    "threshold_calibration": {
+      "class_counts": {
+        "other": 353,
+        "run": 75,
+        "walk": 255
+      },
+      "clip_count": 683,
+      "level": "clip",
+      "probability_source": "training_oof"
+    },
+    "window_frames": 45,
+    "window_stride_frames": 15
+  },
+  "training_window_count": 1858,
+  "validation_clip_count": 286,
+  "validation_window_count": 2840,
+  "window_level": {
+    "macro_f1": 0.7592174938008508,
+    "per_class": {
+      "other": {
+        "f1": 0.9072360616844602,
+        "precision": 0.9593577521324637,
+        "recall": 0.8604860486048604,
+        "support": 2222
+      },
+      "run": {
+        "f1": 0.6303501945525292,
+        "precision": 0.5159235668789809,
+        "recall": 0.81,
+        "support": 100
+      },
+      "walk": {
+        "f1": 0.7400662251655629,
+        "precision": 0.6478260869565218,
+        "recall": 0.862934362934363,
+        "support": 518
+      }
+    }
+  }
+}

@@ -90,10 +90,14 @@ def _reload_all_modules():
     
     # List of modules to reload in dependency order
     modules_to_reload = [
+        'core.motion_features',
+        'core.motion_classifier',
         'core.loop_analysis',
         'core.root_motion',
         'mobu.adapter',
+        'mobu.motion_classifier',
         'mobu.loop_processor',
+        'ui.motion_routing',
         'ui.tool_window',
         'main',
     ]

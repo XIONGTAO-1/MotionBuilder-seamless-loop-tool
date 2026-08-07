@@ -340,6 +340,15 @@ class LoopProcessorService:
         if not hasattr(self, 'processed_data') or not self.processed_data:
             raise RuntimeError("No processed data. Call create_seamless_loop_hierarchy first.")
 
+        validator = getattr(self.adapter, "validate_node_names", None)
+        if callable(validator):
+            validator(self.processed_data)
+        resolver = getattr(self.adapter, "resolve_model", None)
+        if enable_foot_fix and callable(resolver):
+            for node_name in (left_foot, right_foot, left_toe, right_toe):
+                if node_name:
+                    resolver(node_name)
+
         current_fps = None
         if target_fps is not None and hasattr(self.adapter, "get_current_fps"):
             try:
@@ -355,6 +364,7 @@ class LoopProcessorService:
         
         bone_count = 0
         resampled_root = None
+        output_root_name = next(iter(self.processed_data))
         for bone_name, trajectory in self.processed_data.items():
             try:
                 if target_fps is not None and current_fps is not None:
@@ -363,10 +373,16 @@ class LoopProcessorService:
                         source_fps=current_fps,
                         target_fps=target_fps,
                     )
-                if bone_name == root_name:
+                is_root = bone_name == output_root_name
+                if is_root:
                     resampled_root = trajectory
                 if hasattr(self.adapter, 'set_node_trajectory'):
-                    self.adapter.set_node_trajectory(bone_name, trajectory, start_frame=0)
+                    self.adapter.set_node_trajectory(
+                        bone_name,
+                        trajectory,
+                        start_frame=0,
+                        include_translation=is_root,
+                    )
                 else:
                     self.adapter.set_root_trajectory(bone_name, trajectory, start_frame=0)
                 bone_count += 1
@@ -1034,7 +1050,9 @@ class LoopProcessorService:
                 print(f"[SeamlessLoopTool] Warning: Skipping bone '{bone_name}': {e}")
         
         # Store root trajectory for compatibility
-        self.processed_trajectory = self.processed_data.get(root_name)
+        self.processed_trajectory = (
+            self.processed_data.get(bone_names[0]) if bone_names else None
+        )
         
         print(f"[SeamlessLoopTool] Hierarchy processing complete: {len(self.processed_data)} bones")
         return self.processed_data

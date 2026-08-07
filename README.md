@@ -28,6 +28,7 @@ The tool searches for a **walk/run cycle segment** (start + end) in the current 
 Unlike simple tools that only process the root, this tool handles the **entire skeleton hierarchy**.
 - **Resampling**: All animation curves are resampled to integer frames to eliminate sub-frame jitter.
 - **Trimming**: The timeline is cropped to exactly `[Start Frame ... Loop Frame]`.
+- **Safe FK Writeback**: Hips owns translation; child joints receive rotation only, avoiding Character/HumanIK translation jitter. Foot/toe translation is added only by the explicit Foot Contact Fix.
 
 ### 3. Linear Offset Compensation
 To create a perfect loop, the last frame must mathematically equal the first frame.
@@ -102,6 +103,43 @@ The tool relies on the following Python libraries:
 1.  **`pyfbsdk`**: Built-in MotionBuilder SDK.
 2.  **`PySide2`** or **`PySide6`**: Built-in UI framework (Qt) in modern MotionBuilder.
 3.  **`numpy`**: **[Required]** Used for high-performance matrix and vector math.
+
+The optional model-training environment is separate from MotionBuilder and uses Python 3.11 plus scikit-learn 1.9.0. MotionBuilder inference still requires only NumPy.
+
+---
+
+## Walk / Run / Other Motion Router
+
+The repository includes a versioned geometric descriptor, a trained Random Forest JSON model, and a pure NumPy MotionBuilder adapter. The UI classifies the current characterized Character before loop analysis. Walk and run continue to the existing gait-cycle detector; other results and classification failures require explicit confirmation before analysis continues.
+
+### Train and evaluate externally
+
+```bash
+python3.11 -m venv .venv-training
+.venv-training/bin/pip install -r training/requirements.txt
+.venv-training/bin/python training/train_motion_router.py \
+  --dataset-root /path/to/processed_amass_babel_router
+```
+
+Training writes `models/motion_router_v1.json`, its SHA-256 file, the feature schema, and audit reports under `reports/`. The default command uses 30 randomized parameter candidates, five source-grouped folds, and the fixed seed `42`.
+
+### Classify a characterized MotionBuilder character
+
+```python
+from pathlib import Path
+
+from mobu.motion_classifier import MotionClassifier
+
+classifier = MotionClassifier(Path("models/motion_router_v1.json"))
+result = classifier.classify_character(character)
+print(result.label, result.confidence, result.reason)
+```
+
+The sampler reads the 18 standard `FBBodyNodeId` slots, converts Hips translation from centimeters to meters, resamples to 30 FPS, and classifies 45-frame windows with a 15-frame stride. Missing characterization, missing joints, short clips, invalid data, schema mismatch, checksum failure, or a damaged model safely return `other` with a diagnostic `reason`. Experimental models require `allow_experimental=True` when constructing `MotionClassifier`.
+
+### MotionBuilder UI workflow
+
+Select the active character in Character Controls, then click **Analyze Loop Point**. The tool classifies the full current Take and shows the walk, run, and other probabilities. Walk and run proceed automatically. Other motions or unavailable classifications show a confirmation dialog because the current loop detector is gait-specific. Changing the active Character, Take, or frame range invalidates the analysis and requires Analyze to run again before Process or Apply.
 
 ---
 

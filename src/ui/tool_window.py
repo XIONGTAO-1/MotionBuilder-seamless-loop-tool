@@ -8,6 +8,11 @@ import logging
 
 logger = logging.getLogger(__name__)
 
+from ui.bone_namespace import (
+    extract_namespace,
+    normalize_namespace,
+    qualify_bone_name,
+)
 from ui.export_fps import get_export_fps_choices, get_default_export_fps
 
 # Try to import PySide2 (available in MotionBuilder 2024)
@@ -55,6 +60,8 @@ class SeamlessLoopToolWindow(QtBaseWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.service = None
+        self.motion_router = None
+        self.analysis_context = None
         
         # State
         self.root_name = "Hips"
@@ -90,6 +97,25 @@ class SeamlessLoopToolWindow(QtBaseWidget):
         self.btn_get_selected.clicked.connect(self._on_get_selected_clicked)
         root_layout.addWidget(self.btn_get_selected)
         layout.addLayout(root_layout)
+
+        namespace_layout = QtWidgets.QHBoxLayout()
+        namespace_layout.addWidget(QLabel("Namespace:"))
+        self.edit_namespace = QtWidgets.QLineEdit("")
+        self.edit_namespace.setPlaceholderText("e.g. mixamorig:")
+        self.edit_namespace.setToolTip(
+            "Enter a namespace and press Enter, or capture it from a selected bone"
+        )
+        self.edit_namespace.editingFinished.connect(
+            self._on_namespace_edit_finished
+        )
+        namespace_layout.addWidget(self.edit_namespace)
+        self.btn_get_namespace = QtWidgets.QPushButton("← Get from Selected")
+        self.btn_get_namespace.setToolTip(
+            "Extract the namespace from the selected bone's complete name"
+        )
+        self.btn_get_namespace.clicked.connect(self._on_get_namespace_clicked)
+        namespace_layout.addWidget(self.btn_get_namespace)
+        layout.addLayout(namespace_layout)
 
         # Foot/Toe Bone Inputs
         self.edit_left_foot = QtWidgets.QLineEdit(self.left_foot_name)
@@ -198,6 +224,22 @@ class SeamlessLoopToolWindow(QtBaseWidget):
         advanced_layout.addRow(QLabel("Hips RotY Target"), self.spin_target_rot_y)
         advanced_layout.addRow(QLabel("Export FPS"), self.combo_export_fps)
         layout.addWidget(advanced_group)
+
+        motion_group = QGroupBox("Motion Type")
+        motion_layout = QtWidgets.QVBoxLayout(motion_group)
+        self.lbl_motion_type = QLabel("Not classified")
+        self.lbl_motion_type.setStyleSheet("font-weight: bold; color: gray;")
+        motion_layout.addWidget(self.lbl_motion_type)
+        self.lbl_motion_probabilities = QLabel(
+            "Walk -- | Run -- | Other -- | Windows 0"
+        )
+        motion_layout.addWidget(self.lbl_motion_probabilities)
+        self.lbl_motion_diagnostic = QLabel("")
+        self.lbl_motion_diagnostic.setWordWrap(True)
+        self.lbl_motion_diagnostic.setStyleSheet("color: #b00020;")
+        self.lbl_motion_diagnostic.hide()
+        motion_layout.addWidget(self.lbl_motion_diagnostic)
+        layout.addWidget(motion_group)
         
         # Analyze Button
         self.btn_analyze = QtWidgets.QPushButton("1. Analyze Loop Point")
@@ -211,11 +253,13 @@ class SeamlessLoopToolWindow(QtBaseWidget):
         # Process Button
         self.btn_process = QtWidgets.QPushButton("2. Process (Trim + Blend + In-Place)")
         self.btn_process.clicked.connect(self._on_process_clicked)
+        self.btn_process.setEnabled(False)
         layout.addWidget(self.btn_process)
         
         # Apply Button
         self.btn_apply = QtWidgets.QPushButton("3. Apply Changes to Scene")
         self.btn_apply.clicked.connect(self._on_apply_clicked)
+        self.btn_apply.setEnabled(False)
         layout.addWidget(self.btn_apply)
         
         layout.addStretch()
@@ -240,9 +284,18 @@ class SeamlessLoopToolWindow(QtBaseWidget):
     def _init_service(self):
         """Initialize the processing service."""
         self.service = None
+        self.motion_router = None
         try:
             from mobu.adapter import MoBuAdapter, IN_MOTIONBUILDER
             from mobu.loop_processor import LoopProcessorService
+            from mobu.motion_classifier import (
+                MotionBuilderCharacterSampler,
+                MotionClassifier,
+            )
+            from ui.motion_routing import (
+                MotionRoutingController,
+                default_motion_model_path,
+            )
             
             if not IN_MOTIONBUILDER:
                 self._set_status("Error: Not in MotionBuilder environment")
@@ -250,6 +303,11 @@ class SeamlessLoopToolWindow(QtBaseWidget):
             
             adapter = MoBuAdapter()
             self.service = LoopProcessorService(adapter)
+            classifier = MotionClassifier(
+                default_motion_model_path(),
+                sampler=MotionBuilderCharacterSampler(adapter=adapter),
+            )
+            self.motion_router = MotionRoutingController(classifier, adapter)
             self._set_status("Service initialized - Ready")
         except ImportError as e:
             self._set_status(f"Import error: {e}")
@@ -291,6 +349,91 @@ class SeamlessLoopToolWindow(QtBaseWidget):
             self._set_status("Error: Service not initialized. Restart tool.")
             return False
         return True
+
+    def _check_motion_router(self) -> bool:
+        if self.motion_router is None:
+            self._set_status("Error: Motion classifier not initialized. Restart tool.")
+            return False
+        return True
+
+    def _reset_motion_display(self):
+        self.lbl_motion_type.setText("Not classified")
+        self.lbl_motion_type.setStyleSheet("font-weight: bold; color: gray;")
+        self.lbl_motion_probabilities.setText(
+            "Walk -- | Run -- | Other -- | Windows 0"
+        )
+        self.lbl_motion_diagnostic.clear()
+        self.lbl_motion_diagnostic.hide()
+
+    def _reset_analysis_state(self, clear_motion=False):
+        for name in ("cycle_start", "cycle_end", "start_frame", "end_frame"):
+            if hasattr(self, name):
+                delattr(self, name)
+        self.loop_frame = None
+        self.processed = False
+        self.analysis_context = None
+        self.btn_process.setEnabled(False)
+        self.btn_apply.setEnabled(False)
+        self.lbl_loop_frame.setText("Best Loop Frame: (click Analyze)")
+        if clear_motion:
+            self._reset_motion_display()
+
+    def _display_motion_decision(self, decision):
+        from ui.motion_routing import format_probability_summary
+
+        colors = {
+            "walk": "#2e7d32",
+            "run": "#1565c0",
+            "other": "#a15c00",
+        }
+        color = "#b00020" if decision.is_failure else colors[decision.result.label]
+        label = decision.display_label
+        if not decision.is_failure:
+            label = f"{label} — {decision.result.confidence:.1%} confidence"
+        self.lbl_motion_type.setText(label)
+        self.lbl_motion_type.setStyleSheet(f"font-weight: bold; color: {color};")
+        self.lbl_motion_probabilities.setText(format_probability_summary(decision))
+        self.lbl_motion_diagnostic.setText(decision.diagnostic)
+        self.lbl_motion_diagnostic.setVisible(decision.is_failure)
+
+    def _confirm_analyze_anyway(self, decision) -> bool:
+        from ui.motion_routing import confirmation_message
+
+        dialog = QtWidgets.QMessageBox(self)
+        dialog.setIcon(QtWidgets.QMessageBox.Warning)
+        dialog.setWindowTitle("Motion Classification")
+        dialog.setText(confirmation_message(decision))
+        cancel_button = dialog.addButton(
+            "Cancel", QtWidgets.QMessageBox.RejectRole
+        )
+        continue_button = dialog.addButton(
+            "Analyze Anyway", QtWidgets.QMessageBox.AcceptRole
+        )
+        dialog.setDefaultButton(cancel_button)
+        dialog.setEscapeButton(cancel_button)
+        execute = getattr(dialog, "exec", None) or dialog.exec_
+        execute()
+        return dialog.clickedButton() is continue_button
+
+    def _classify_current_take(self):
+        self._set_status("Classifying current take...")
+        self.lbl_motion_type.setText("Classifying...")
+        self.lbl_motion_type.setStyleSheet("font-weight: bold; color: gray;")
+        QtWidgets.QApplication.setOverrideCursor(QtCore.Qt.WaitCursor)
+        try:
+            QtWidgets.QApplication.processEvents()
+            return self.motion_router.classify_current_take()
+        finally:
+            QtWidgets.QApplication.restoreOverrideCursor()
+
+    def _validate_analysis_context(self) -> bool:
+        if self.analysis_context is not None and self.motion_router.context_is_current(
+            self.analysis_context
+        ):
+            return True
+        self._reset_analysis_state(clear_motion=True)
+        self._set_status("Character, Take, or frame range changed. Analyze again.")
+        return False
     
     def _set_selected_to_edit(self, edit_field, label: str):
         """Get selected bone from Navigator and fill in a field."""
@@ -309,41 +452,93 @@ class SeamlessLoopToolWindow(QtBaseWidget):
     def _on_get_selected_clicked(self):
         """Get selected bone from Navigator and fill in Root Bone field."""
         self._set_selected_to_edit(self.edit_root, "Root Bone")
-    
-    def _on_analyze_clicked(self):
-        """Handle Analyze button click - uses cycle detection to find mid-animation loop."""
+
+    def _apply_bone_namespace(self, namespace: str) -> None:
+        normalized = normalize_namespace(namespace)
+        fields = (
+            (self.edit_root, "Hips"),
+            (self.edit_left_foot, "LeftFoot"),
+            (self.edit_right_foot, "RightFoot"),
+            (self.edit_left_toe, "LeftToeBase"),
+            (self.edit_right_toe, "RightToeBase"),
+        )
+        updates = [
+            (field, qualify_bone_name(field.text(), normalized, default_name))
+            for field, default_name in fields
+        ]
+        changed = self.edit_namespace.text() != normalized or any(
+            field.text() != value for field, value in updates
+        )
+
+        self.edit_namespace.setText(normalized)
+        for field, value in updates:
+            field.setText(value)
+
+        if changed:
+            self._reset_analysis_state(clear_motion=True)
+
+    def _on_namespace_edit_finished(self) -> None:
+        self._apply_bone_namespace(self.edit_namespace.text())
+        namespace = self.edit_namespace.text() or "(none)"
+        self._set_status(f"Namespace set to: {namespace}")
+
+    def _on_get_namespace_clicked(self) -> None:
         if not self._check_service():
             return
-        self._get_params()
-        self._set_status(f"Analyzing... (root: {self.root_name})")
-        
         try:
-            # Get frame range for debugging
-            start, end = self.service.adapter.get_frame_range()
-            print(f"[SeamlessLoopTool] Frame range: {start} - {end} ({end - start + 1} frames)")
-            
-            # Use find_walk_cycle to detect a cycle segment (not starting from frame 0)
-            min_cycle_frames = self.spin_min_cycle_frames.value()
-            max_cycle_frames = self.spin_max_cycle_frames.value()
-            min_vertical_bounce = self.spin_min_vertical_bounce.value()
-
-            self.cycle_start, self.cycle_end = self.service.find_walk_cycle(
-                root_name=self.root_name,
-                min_cycle_frames=min_cycle_frames,
-                max_cycle_frames=max_cycle_frames,
-                min_vertical_bounce=min_vertical_bounce
-            )
-            self.start_frame = self.cycle_start
-            self.end_frame = self.cycle_end
-            # For compatibility
-            self.loop_frame = self.cycle_end
-            
-            cycle_length = self.cycle_end - self.cycle_start
-            self.lbl_loop_frame.setText(
-                f"Cycle: {self.cycle_start} - {self.cycle_end} ({cycle_length} frames)"
-            )
-            self._set_status(f"Found cycle: frames {self.cycle_start}-{self.cycle_end}")
+            selected_name = self.service.adapter.get_selected_model_name()
+            if not selected_name:
+                self._set_status("No model selected in Navigator")
+                return
+            self._apply_bone_namespace(extract_namespace(selected_name))
+            namespace = self.edit_namespace.text() or "(none)"
+            self._set_status(f"Namespace set to: {namespace}")
         except Exception as e:
+            self._set_status(f"Error: {e}")
+
+    def _find_loop_cycle(self, context):
+        start, end = self.service.adapter.get_frame_range()
+        print(
+            f"[SeamlessLoopTool] Frame range: {start} - {end} "
+            f"({end - start + 1} frames)"
+        )
+        self.cycle_start, self.cycle_end = self.service.find_walk_cycle(
+            root_name=self.root_name,
+            min_cycle_frames=self.spin_min_cycle_frames.value(),
+            max_cycle_frames=self.spin_max_cycle_frames.value(),
+            min_vertical_bounce=self.spin_min_vertical_bounce.value(),
+        )
+        self.start_frame = self.cycle_start
+        self.end_frame = self.cycle_end
+        self.loop_frame = self.cycle_end
+        self.analysis_context = context
+        cycle_length = self.cycle_end - self.cycle_start
+        self.lbl_loop_frame.setText(
+            f"Cycle: {self.cycle_start} - {self.cycle_end} ({cycle_length} frames)"
+        )
+        self.btn_process.setEnabled(True)
+        self._set_status(f"Found cycle: frames {self.cycle_start}-{self.cycle_end}")
+
+    def _on_analyze_clicked(self):
+        """Classify the current Take, then run gait-cycle detection when allowed."""
+        if not self._check_service() or not self._check_motion_router():
+            return
+        self._reset_analysis_state()
+        self._get_params()
+
+        try:
+            decision = self._classify_current_take()
+            self._display_motion_decision(decision)
+            if decision.requires_confirmation and not self._confirm_analyze_anyway(
+                decision
+            ):
+                self._set_status("Loop analysis cancelled by motion classification gate.")
+                return
+            route = "override" if decision.requires_confirmation else decision.result.label
+            self._set_status(f"Motion route: {route}. Analyzing loop...")
+            self._find_loop_cycle(decision.context)
+        except Exception as e:
+            self._reset_analysis_state()
             self._set_status(f"Error: {e}")
             import traceback
             traceback.print_exc()
@@ -357,6 +552,8 @@ class SeamlessLoopToolWindow(QtBaseWidget):
         # Check if we have analyzed cycle first
         if not hasattr(self, 'start_frame') or not hasattr(self, 'end_frame'):
             self._set_status("Please Analyze first!")
+            return
+        if not self._validate_analysis_context():
             return
         
         self._set_status("Processing hierarchy...")
@@ -378,6 +575,7 @@ class SeamlessLoopToolWindow(QtBaseWidget):
                     enable_foot_fix=bool(self.enable_foot_fix),
                 )
                 self.processed = True
+                self.btn_apply.setEnabled(True)
                 bone_count = len(processed_data)
                 frame_count = len(next(iter(processed_data.values()))) if processed_data else 0
                 self._set_status(f"Processed: {bone_count} bones, {frame_count} frames")
@@ -392,8 +590,11 @@ class SeamlessLoopToolWindow(QtBaseWidget):
                     target_rot_y=self.target_rot_y,
                 )
                 self.processed = True
+                self.btn_apply.setEnabled(True)
                 self._set_status(f"Processed: {len(trajectory)} frames (root only)")
         except Exception as e:
+            self.processed = False
+            self.btn_apply.setEnabled(False)
             self._set_status(f"Error: {e}")
             import traceback
             traceback.print_exc()
@@ -402,6 +603,8 @@ class SeamlessLoopToolWindow(QtBaseWidget):
         """Handle Apply button click - writes the entire hierarchy."""
         if not self.processed:
             self._set_status("Please Process first!")
+            return
+        if not self._validate_analysis_context():
             return
         self._get_params()
         self._set_status("Applying changes to hierarchy...")

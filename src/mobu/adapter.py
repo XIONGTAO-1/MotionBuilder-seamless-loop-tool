@@ -11,6 +11,14 @@ from typing import Optional, Tuple, Dict
 
 logger = logging.getLogger(__name__)
 
+
+class _ModelNotFoundError(ValueError):
+    pass
+
+
+class _AmbiguousModelError(ValueError):
+    pass
+
 # Try to import pyfbsdk - will only work inside MotionBuilder
 IN_MOTIONBUILDER = False
 FBSystem = None
@@ -32,6 +40,7 @@ FBGetSelectedModels = None
 FBModelTransformationType = None
 FBMatrix = None
 FBModel = None
+FBBodyNodeId = None
 
 # Robust import: try each separately to handle missing symbols
 try:
@@ -54,6 +63,7 @@ try:
     FBTangentMode = getattr(pyfbsdk, 'FBTangentMode', None)
     FBModel = getattr(pyfbsdk, 'FBModel', None)
     FBMatrix = getattr(pyfbsdk, 'FBMatrix', None)
+    FBBodyNodeId = getattr(pyfbsdk, 'FBBodyNodeId', None)
     
     # Import find functions
     FBFindModelByLabelName = getattr(pyfbsdk, 'FBFindModelByLabelName', None)
@@ -111,6 +121,15 @@ class MoBuAdapter:
     def get_current_take_name(self) -> str:
         """Get the name of the current take."""
         return self._system.CurrentTake.Name
+
+    def get_current_character(self):
+        """Return the character selected in MotionBuilder's Character Controls."""
+        if FBApplication is None:
+            return None
+        try:
+            return getattr(FBApplication(), "CurrentCharacter", None)
+        except Exception:
+            return None
 
     def get_take_names(self) -> list:
         """Return all take names in the current scene."""
@@ -322,6 +341,103 @@ class MoBuAdapter:
         "CC_Base_Hip", "CC_Base_Pelvis",
         "root", "hips", "hip", "pelvis",
     ]
+
+    @staticmethod
+    def _is_valid_model(model) -> bool:
+        try:
+            return model is not None and hasattr(model, "Translation")
+        except Exception:
+            return False
+
+    def _iter_scene_models(self):
+        scene = getattr(getattr(self, "_system", None), "Scene", None)
+        root = getattr(scene, "RootModel", None)
+        stack = list(getattr(root, "Children", []) or [])
+        while stack:
+            model = stack.pop(0)
+            yield model
+            stack[0:0] = list(getattr(model, "Children", []) or [])
+
+    @staticmethod
+    def _model_identifier(model) -> str:
+        return (
+            getattr(model, "LongName", "")
+            or getattr(model, "LabelName", "")
+            or getattr(model, "Name", "")
+        )
+
+    @classmethod
+    def _model_key(cls, model):
+        identifier = cls._model_identifier(model)
+        if identifier:
+            return ("name", identifier)
+        return ("object", id(model))
+
+    def resolve_model(self, node_name: str):
+        """Resolve exactly one scene model without root-bone fallback."""
+        requested = (node_name or "").strip()
+        if not requested:
+            raise _ModelNotFoundError("Bone name is empty")
+
+        qualified = ":" in requested
+        candidates = []
+        candidate_keys = set()
+
+        def matches(model) -> bool:
+            if not self._is_valid_model(model):
+                return False
+            long_name = getattr(model, "LongName", "")
+            label_name = getattr(model, "LabelName", "")
+            name = getattr(model, "Name", "")
+            if qualified:
+                return requested in (long_name, label_name)
+            return requested in (name, label_name, long_name)
+
+        def add_candidate(model) -> None:
+            model_key = self._model_key(model)
+            if matches(model) and model_key not in candidate_keys:
+                candidates.append(model)
+                candidate_keys.add(model_key)
+
+        if callable(FBFindModelByLabelName):
+            try:
+                add_candidate(FBFindModelByLabelName(requested))
+            except Exception:
+                pass
+        if callable(FBFindModelByName):
+            try:
+                add_candidate(FBFindModelByName(requested))
+            except Exception:
+                pass
+
+        for model in self._iter_scene_models():
+            add_candidate(model)
+
+        if not candidates:
+            raise _ModelNotFoundError(f"Bone '{requested}' not found in scene")
+        if len(candidates) > 1:
+            matches_text = ", ".join(
+                self._model_identifier(model) for model in candidates
+            )
+            raise _AmbiguousModelError(
+                f"Ambiguous bone name '{requested}'; use a complete LongName: "
+                f"{matches_text}"
+            )
+        return candidates[0]
+
+    def validate_node_names(self, node_names) -> None:
+        """Require every name to resolve to a different scene model."""
+        resolved = {}
+        for node_name in node_names:
+            model = self.resolve_model(node_name)
+            model_key = self._model_key(model)
+            if model_key in resolved:
+                first_name = resolved[model_key]
+                raise ValueError(
+                    f"Bone names '{first_name}' and '{node_name}' resolve to the "
+                    f"same model '{self._model_identifier(model)}'"
+                )
+            resolved[model_key] = node_name
     
     def find_root_bone(self, root_name: str = "Hips") -> Optional[FBModel]:
         """
@@ -335,85 +451,63 @@ class MoBuAdapter:
         Returns:
             The actual bone model found, or None if not found
         """
-        # Helper to check if model exists (relaxed check)
-        def is_valid_model(model):
+        requested = (root_name or "").strip()
+        if requested:
             try:
-                return model is not None and hasattr(model, "Translation")
-            except Exception:
-                return False
-
-        def model_display_name(model) -> str:
-            label = getattr(model, "LabelName", "")
-            if label:
-                return label
-            return getattr(model, "Name", "")
-
-        def find_model_exact(name: str):
-            name = (name or "").strip()
-            if not name:
-                return None
-            model = FBFindModelByLabelName(name)
-            if is_valid_model(model):
+                model = self.resolve_model(requested)
+                logger.info("Found exact root match: %s", self._model_identifier(model))
                 return model
-            if FBFindModelByName is not None:
-                model = FBFindModelByName(name)
-                if is_valid_model(model):
-                    return model
-            return None
-        
-        # Try exact match first - trust the user's selection
-        model = find_model_exact(root_name)
-        if is_valid_model(model):
-            logger.info("Found exact match: %s", model_display_name(model))
-            return model
-        
-        # Build search list with user's name first
-        root_name = (root_name or "").strip()
-        search_list = [root_name] if root_name else []
+            except _AmbiguousModelError:
+                raise
+            except _ModelNotFoundError:
+                pass
+
+        search_list = []
         for pattern in self.ROOT_BONE_PATTERNS:
-            if pattern.lower() != root_name.lower() and pattern not in search_list:
+            if pattern.lower() != requested.lower() and pattern not in search_list:
                 search_list.append(pattern)
-        
-        # Try each pattern with exact label/name lookup
+
         for pattern in search_list:
-            model = find_model_exact(pattern)
-            if model is not None:
-                logger.info("Found pattern match: %s", model_display_name(model))
+            try:
+                model = self.resolve_model(pattern)
+                logger.info("Found root pattern: %s", self._model_identifier(model))
                 return model
-        
-        # Search all models in scene for matching name (fuzzy search)
-        scene = self._system.Scene
-        found_models = []
-        patterns_lower = [pattern.lower() for pattern in search_list if pattern]
-        
-        # Use recursive helper to iterate all descendants
-        def collect_models(parent):
-            children = getattr(parent, "Children", None)
-            if children is None:
-                return
-            for child in children:
-                if is_valid_model(child):
-                    name = getattr(child, "Name", "")
-                    label = getattr(child, "LabelName", "")
-                    name_lower = name.lower()
-                    label_lower = label.lower()
-                    for pattern_lower in patterns_lower:
-                        if pattern_lower in name_lower or pattern_lower in label_lower:
-                            found_models.append(child)
-                            break
-                collect_models(child)
-        
-        collect_models(scene.RootModel)
-        
-        if found_models:
-            logger.info(
-                "Fuzzy matched: %s from %d candidates",
-                model_display_name(found_models[0]),
-                len(found_models),
+            except _AmbiguousModelError:
+                raise
+            except _ModelNotFoundError:
+                pass
+
+        patterns_lower = [pattern.lower() for pattern in search_list]
+        candidates = []
+        candidate_keys = set()
+        for model in self._iter_scene_models():
+            identifiers = (
+                getattr(model, "LongName", "").lower(),
+                getattr(model, "LabelName", "").lower(),
+                getattr(model, "Name", "").lower(),
             )
-            return found_models[0]
-        
-        logger.warning("No bone found matching: %s...", search_list[:5])
+            if any(
+                pattern in identifier
+                for pattern in patterns_lower
+                for identifier in identifiers
+                if identifier
+            ) and self._model_key(model) not in candidate_keys:
+                candidates.append(model)
+                candidate_keys.add(self._model_key(model))
+
+        if len(candidates) == 1:
+            logger.info("Found fuzzy root: %s", self._model_identifier(candidates[0]))
+            return candidates[0]
+        if len(candidates) > 1:
+            matches_text = ", ".join(
+                self._model_identifier(model) for model in candidates
+            )
+            raise _AmbiguousModelError(
+                f"Ambiguous root bone '{requested or 'Hips'}'; use a complete "
+                f"LongName: {matches_text}"
+            )
+
+        logger.warning("No root bone found matching: %s...", search_list[:5])
         return None
 
     def _collect_child_models(self, parent, result) -> None:
@@ -460,9 +554,9 @@ class MoBuAdapter:
         # Extract names
         names = []
         for m in targets:
-            label = getattr(m, "LabelName", "") or getattr(m, "Name", "")
-            if label:
-                names.append(label)
+            identifier = self._model_identifier(m)
+            if identifier:
+                names.append(identifier)
         
         logger.info("Found %d bones in hierarchy", len(names))
         return names
@@ -474,10 +568,7 @@ class MoBuAdapter:
         end_frame: Optional[int] = None
     ) -> np.ndarray:
         """
-        Extract a bone's trajectory over a specified frame range using resampling.
-        
-        This method uses FCurve.Evaluate() to sample at integer frames,
-        ensuring clean data regardless of source keyframe positions.
+        Extract a bone's local FCurve trajectory over a frame range.
         
         Args:
             node_name: Name of the bone to sample
@@ -487,35 +578,33 @@ class MoBuAdapter:
         Returns:
             Array of shape (num_frames, 6) with [X, Y, Z, RotX, RotY, RotZ]
         """
-        model = self.find_root_bone(node_name)  # Reuses fuzzy matching
-        if model is None:
-            raise ValueError(f"Bone '{node_name}' not found")
+        model = self.resolve_model(node_name)
         
         if start_frame is None or end_frame is None:
             anim_start, anim_end = self.get_frame_range()
             start_frame = start_frame if start_frame is not None else anim_start
             end_frame = end_frame if end_frame is not None else anim_end
         
-        num_frames = end_frame - start_frame + 1
-        trajectory = np.zeros((num_frames, 6))
-        
+        return self._get_fcurve_trajectory(model, start_frame, end_frame)
+
+    def _get_fcurve_trajectory(
+        self,
+        model,
+        start_frame: int,
+        end_frame: int,
+    ) -> np.ndarray:
+        trajectory = np.zeros((end_frame - start_frame + 1, 6))
         for i, frame in enumerate(range(start_frame, end_frame + 1)):
             time = FBTime(0, 0, 0, frame)
-            
-            # Get translation
             translation = model.Translation.GetAnimationNode()
             if translation and hasattr(translation, "Nodes") and len(translation.Nodes) >= 3:
-                trajectory[i, 0] = translation.Nodes[0].FCurve.Evaluate(time)
-                trajectory[i, 1] = translation.Nodes[1].FCurve.Evaluate(time)
-                trajectory[i, 2] = translation.Nodes[2].FCurve.Evaluate(time)
-            
-            # Get rotation
+                for axis in range(3):
+                    trajectory[i, axis] = translation.Nodes[axis].FCurve.Evaluate(time)
+
             rotation = model.Rotation.GetAnimationNode()
             if rotation and hasattr(rotation, "Nodes") and len(rotation.Nodes) >= 3:
-                trajectory[i, 3] = rotation.Nodes[0].FCurve.Evaluate(time)
-                trajectory[i, 4] = rotation.Nodes[1].FCurve.Evaluate(time)
-                trajectory[i, 5] = rotation.Nodes[2].FCurve.Evaluate(time)
-        
+                for axis in range(3):
+                    trajectory[i, axis + 3] = rotation.Nodes[axis].FCurve.Evaluate(time)
         return trajectory
 
     def _get_local_time(self):
@@ -539,6 +628,15 @@ class MoBuAdapter:
         if time is None:
             return False
 
+        player = getattr(self, "_player", None)
+        goto = getattr(player, "Goto", None)
+        if callable(goto):
+            try:
+                goto(time)
+                return True
+            except Exception:
+                pass
+
         system = getattr(self, "_system", None)
         if system is not None:
             try:
@@ -553,18 +651,15 @@ class MoBuAdapter:
                     return True
             except Exception:
                 pass
-
-        player = getattr(self, "_player", None)
-        goto = getattr(player, "Goto", None)
-        if callable(goto):
-            try:
-                goto(time)
-                return True
-            except Exception:
-                pass
         return False
 
-    def _get_model_matrix(self, model, time, xform_type=None):
+    def _evaluate_scene(self) -> None:
+        scene = getattr(getattr(self, "_system", None), "Scene", None)
+        evaluate = getattr(scene, "Evaluate", None)
+        if callable(evaluate):
+            evaluate()
+
+    def _get_model_matrix(self, model, time=None, xform_type=None):
         if model is None or FBMatrix is None:
             return None
 
@@ -572,29 +667,28 @@ class MoBuAdapter:
         if xform_type is None and FBModelTransformationType is not None:
             xform_type = getattr(FBModelTransformationType, "kModelTransformation", None)
 
-        if xform_type is None:
-            model.GetMatrix(fb_matrix)
-            return fb_matrix
-
+        previous_time = self._get_local_time() if time is not None else None
+        time_set = False
+        if time is not None:
+            time_set = self._set_local_time(time)
+            if not time_set:
+                raise RuntimeError("Unable to seek MotionBuilder timeline for matrix sampling")
+            self._evaluate_scene()
         try:
-            model.GetMatrix(fb_matrix, xform_type, True, time)
-            return fb_matrix
-        except TypeError:
-            pass
-
-        prev_time = self._get_local_time()
-        time_set = self._set_local_time(time)
-        try:
-            try:
-                model.GetMatrix(fb_matrix, xform_type, True)
-            except TypeError:
+            if xform_type is None:
+                model.GetMatrix(fb_matrix)
+            else:
                 try:
-                    model.GetMatrix(fb_matrix, xform_type)
+                    model.GetMatrix(fb_matrix, xform_type, True)
                 except TypeError:
-                    model.GetMatrix(fb_matrix)
+                    try:
+                        model.GetMatrix(fb_matrix, xform_type)
+                    except TypeError:
+                        model.GetMatrix(fb_matrix)
         finally:
-            if time_set and prev_time is not None:
-                self._set_local_time(prev_time)
+            if time_set and previous_time is not None:
+                self._set_local_time(previous_time)
+                self._evaluate_scene()
 
         return fb_matrix
 
@@ -670,9 +764,7 @@ class MoBuAdapter:
         """
         Sample world-space translations for a node over a frame range.
         """
-        model = self.find_root_bone(node_name)
-        if model is None:
-            raise ValueError(f"Bone '{node_name}' not found")
+        model = self.resolve_model(node_name)
 
         if start_frame is None or end_frame is None:
             anim_start, anim_end = self.get_frame_range()
@@ -725,10 +817,7 @@ class MoBuAdapter:
         Returns:
             Number of frames that were keyed
         """
-        model = self.find_root_bone(node_name)
-        if model is None:
-            logger.warning("clamp_node_to_ground: bone '%s' not found", node_name)
-            return 0
+        model = self.resolve_model(node_name)
         
         if FBTime is None:
             logger.warning("clamp_node_to_ground: FBTime not available")
@@ -812,7 +901,8 @@ class MoBuAdapter:
         self,
         node_name: str,
         trajectory: np.ndarray,
-        start_frame: int = 0
+        start_frame: int = 0,
+        include_translation: bool = True,
     ) -> None:
         """
         Write a trajectory to a specific bone, starting at given frame.
@@ -821,17 +911,25 @@ class MoBuAdapter:
             node_name: Name of the bone
             trajectory: Array of shape (num_frames, 3 or 6)
             start_frame: Frame to start writing from (default 0)
+            include_translation: Write XYZ translation channels when True
         """
-        model = self.find_root_bone(node_name)
-        if model is None:
-            raise ValueError(f"Bone '{node_name}' not found in scene")
+        model = self.resolve_model(node_name)
 
         end_frame = start_frame + int(len(trajectory)) - 1
         has_rotation = trajectory.shape[1] >= 6
 
-        self._clear_keys_all_layers(model, start_frame, end_frame, True)
+        self._clear_keys_all_layers(
+            model,
+            start_frame,
+            end_frame,
+            True,
+            clear_translation=include_translation,
+        )
 
-        translation_node, rotation_node = self._ensure_animation_nodes(model)
+        translation_node, rotation_node = self._ensure_animation_nodes(
+            model,
+            include_translation=include_translation,
+        )
         translation_nodes = None
         rotation_nodes = None
 
@@ -950,14 +1048,19 @@ class MoBuAdapter:
         
         return poses
 
-    def _ensure_animation_nodes(self, model) -> Tuple[Optional[object], Optional[object]]:
+    def _ensure_animation_nodes(
+        self,
+        model,
+        include_translation: bool = True,
+        include_rotation: bool = True,
+    ) -> Tuple[Optional[object], Optional[object]]:
         translation_node = None
         rotation_node = None
         if model is None:
             return translation_node, rotation_node
 
         translation = getattr(model, "Translation", None)
-        if translation is not None:
+        if include_translation and translation is not None:
             try:
                 translation.SetAnimated(True)
             except Exception:
@@ -968,7 +1071,7 @@ class MoBuAdapter:
                 translation_node = None
 
         rotation = getattr(model, "Rotation", None)
-        if rotation is not None:
+        if include_rotation and rotation is not None:
             try:
                 rotation.SetAnimated(True)
             except Exception:
@@ -1096,7 +1199,8 @@ class MoBuAdapter:
         model,
         start_frame: int,
         end_frame: int,
-        has_rotation: bool
+        has_rotation: bool,
+        clear_translation: bool = True,
     ) -> None:
         """
         Clear all animation keys for a model across all layers.
@@ -1114,9 +1218,13 @@ class MoBuAdapter:
             if layer is not None:
                 self._set_current_layer(take, layer)
 
-            translation_node, rotation_node = self._ensure_animation_nodes(model)
+            translation_node, rotation_node = self._ensure_animation_nodes(
+                model,
+                include_translation=clear_translation,
+                include_rotation=has_rotation,
+            )
 
-            if translation_node is not None and hasattr(translation_node, "Nodes"):
+            if clear_translation and translation_node is not None and hasattr(translation_node, "Nodes"):
                 if len(translation_node.Nodes) >= 3:
                     for i in range(3):
                         fcurve = translation_node.Nodes[i].FCurve
@@ -1206,12 +1314,7 @@ class MoBuAdapter:
             trajectory: Array of shape (num_frames, 3 or 6) with [X, Y, Z, RotX, RotY, RotZ]
             start_frame: Optional start frame (ignored; keys are written from frame 0)
         """
-        root_name = (root_name or "").strip()
-        model = FBFindModelByLabelName(root_name)
-        if model is None and FBFindModelByName is not None:
-            model = FBFindModelByName(root_name)
-        if model is None:
-            raise ValueError(f"Bone '{root_name}' not found in scene")
+        model = self.resolve_model(root_name)
 
         start_frame = 0
         end_frame = int(len(trajectory)) - 1
@@ -1369,7 +1472,8 @@ class MockMoBuAdapter:
         self,
         node_name: str,
         trajectory: np.ndarray,
-        start_frame: int = 0
+        start_frame: int = 0,
+        include_translation: bool = True,
     ) -> None:
         """Store trajectory for a specific node."""
         if not hasattr(self, '_bone_data'):

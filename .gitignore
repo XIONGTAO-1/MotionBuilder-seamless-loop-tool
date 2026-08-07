@@ -9,8 +9,11 @@ wheels/
 # Virtual environments
 .venv
 
-# Documentation plans
-docs/plans/
+# Generated/output artifacts
+docs/
+tmp/
+outputs/
+output/
 
 # Planning artifacts
 findings.md
