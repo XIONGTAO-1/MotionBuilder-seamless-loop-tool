@@ -76,6 +76,13 @@ class SeamlessLoopToolWindow(QtBaseWidget):
         
         self._setup_ui()
         self._init_service()
+
+    def _create_foot_fix_checkbox(self):
+        checkbox = QtWidgets.QCheckBox("Enable Foot Contact Fix")
+        checkbox.setChecked(False)
+        checkbox.setToolTip("Apply ground contact correction to foot bones")
+        checkbox.stateChanged.connect(self._on_foot_fix_toggled)
+        return checkbox
     
     def _setup_ui(self):
         """Create the UI layout."""
@@ -182,10 +189,7 @@ class SeamlessLoopToolWindow(QtBaseWidget):
         layout.addWidget(self.chk_preserve)
 
         # Enable Foot Fix Checkbox
-        self.chk_enable_foot_fix = QtWidgets.QCheckBox("Enable Foot Contact Fix")
-        self.chk_enable_foot_fix.setChecked(True)
-        self.chk_enable_foot_fix.setToolTip("Apply ground contact correction to foot bones")
-        self.chk_enable_foot_fix.stateChanged.connect(self._on_foot_fix_toggled)
+        self.chk_enable_foot_fix = self._create_foot_fix_checkbox()
         layout.addWidget(self.chk_enable_foot_fix)
 
         # Advanced Settings

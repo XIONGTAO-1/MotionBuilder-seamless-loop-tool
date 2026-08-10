@@ -196,3 +196,43 @@ def test_reapplying_same_namespace_keeps_analysis_state():
     window._apply_bone_namespace("mixamorig:")
 
     assert window.reset_calls == []
+
+
+class FakeSignal:
+    def __init__(self):
+        self.callbacks = []
+
+    def connect(self, callback):
+        self.callbacks.append(callback)
+
+
+class FakeCheckBox:
+    def __init__(self, label):
+        self.label = label
+        self.checked = None
+        self.tooltip = ""
+        self.stateChanged = FakeSignal()
+
+    def setChecked(self, checked):
+        self.checked = bool(checked)
+
+    def isChecked(self):
+        return self.checked
+
+    def setToolTip(self, tooltip):
+        self.tooltip = tooltip
+
+
+def test_foot_contact_fix_checkbox_is_unchecked_by_default(monkeypatch):
+    from ui import tool_window
+
+    monkeypatch.setattr(
+        tool_window,
+        "QtWidgets",
+        SimpleNamespace(QCheckBox=FakeCheckBox),
+    )
+    window = SeamlessLoopToolWindow.__new__(SeamlessLoopToolWindow)
+
+    checkbox = window._create_foot_fix_checkbox()
+
+    assert checkbox.isChecked() is False

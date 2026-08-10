@@ -2,117 +2,302 @@
 
 [![Python](https://img.shields.io/badge/Python-3.10%2B-blue.svg)](https://www.python.org/)
 [![MotionBuilder](https://img.shields.io/badge/MotionBuilder-2024%2B-orange.svg)](https://www.autodesk.com/products/motionbuilder/overview)
-[![License](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 
-A professional tool for automating the creation of seamless loop animations (Walk/Run cycles) directly within Autodesk MotionBuilder. It features intelligent cycle detection, hierarchy-aware blending, foot contact correction, and "In-Place" root motion processing for game engine pipelines.
+**Version:** 2.1.0
 
-**Version**: 2.1
+Seamless Loop Tool creates in-place walk and run cycles directly in Autodesk MotionBuilder. It combines motion-type routing, gait-cycle detection, hierarchy-aware loop processing, root-motion removal, orientation alignment, FPS resampling, namespace-safe bone lookup, and optional foot-contact correction in one non-destructive workflow.
 
----
+The MotionBuilder runtime uses `pyfbsdk`, PySide, and NumPy. The bundled motion router performs inference with pure NumPy; scikit-learn is required only when training a replacement model outside MotionBuilder.
 
+## Requirements
 
+### MotionBuilder runtime
 
-##  Core Design Logic
+- Autodesk MotionBuilder 2024 or newer.
+- MotionBuilder's built-in `pyfbsdk`.
+- MotionBuilder's built-in `PySide2` or `PySide6`.
+- A NumPy build compatible with MotionBuilder's embedded Python.
 
-This tool automates the tedious process of finding potential loop points and seamless blending. Here is the step-by-step logic:
+The plugin has been verified with MotionBuilder 2024 on Windows and Linux.
 
-### 1. Loop Analysis (The "Brain")
-The tool searches for a **walk/run cycle segment** (start + end) in the current take.
-- **Peak-Based Candidate Detection**: Uses hip vertical motion (`Y`) peaks by default to find stable gait landmarks.
-- **Period Estimation**: Estimates the gait half-period from the hip signal and prefers full-stride cycles (2x period) for left-right symmetry.
-- **Velocity-Weighted Scoring**: Ranks candidate (start, end) pairs by a weighted position+velocity cost (velocity weighted ~5x) to preserve momentum at the loop boundary.
-- **Vertical Bounce Veto (`Min Vertical Bounce`)**: Rejects segments that are too flat (often slide/idle).
-- **Minimum Motion Filter (`Min Average Velocity`)**: Rejects near-static segments (e.g., T-pose ranges).
+### Character prerequisite for motion classification
 
-### 2. Hierarchy-Aware Processing
-Unlike simple tools that only process the root, this tool handles the **entire skeleton hierarchy**.
-- **Resampling**: All animation curves are resampled to integer frames to eliminate sub-frame jitter.
-- **Trimming**: The timeline is cropped to exactly `[Start Frame ... Loop Frame]`.
-- **Safe FK Writeback**: Hips owns translation; child joints receive rotation only, avoiding Character/HumanIK translation jitter. Foot/toe translation is added only by the explicit Foot Contact Fix.
+The walk/run/other classifier operates on MotionBuilder's characterized HumanIK body nodes. Before clicking **Analyze Loop Point**:
 
-### 3. Linear Offset Compensation
-To create a perfect loop, the last frame must mathematically equal the first frame.
-- The difference (offset) between the last frame and first frame is calculated.
-- This offset is distributed **linearly across the entire segment** (not a short window).
-- **Result**: The animation loops seamlessly without "popping" or foot sliding.
+1. Create a valid **Character Definition** for the skeleton.
+2. Characterize it successfully.
+3. Make that Character current in **Character Controls**.
 
-### 4. Root Motion to "In-Place"
-For Game Engine integration (Unreal/Unity), the tool processes the Root Bone (Hips):
-- **X/Z Lock**: The root's X and Z translation are forced to `0.0` (World Origin).
-- **Y Preservation**: The vertical height (Y) is preserved, keeping the natural bounce of the walk.
-- **Rotation**: All rotations are preserved.
-This allows the Game Engine to drive the character's capsule via code while the animation plays in place.
+If no current characterized Character is available, characterization state cannot be read, or a required characterized joint is missing, classification returns a safe unavailable/`other` result. The UI explains the problem and requires explicit confirmation before the gait-specific loop analyzer can continue.
 
-### 5. "Reset & Inject" Workflow
-To ensure data integrity:
-1. A **New Take** is created (copy of the current one).
-2. The new take is **cleared** of all keys for the character.
-3. The processed, seamless data is **injected** starting at Frame 0.
-4. This ensures a clean, predictable asset every time.
+Characterization is required for motion classification. The Root, Foot, and Toe text fields are still used by the loop-processing and foot-contact stages and must identify the intended scene models.
 
-### 6. Foot Contact Correction (FK In-Place)
-For in-place FK data, contacts are detected during **Process** on the original take (pre in-place) and stored as absolute frame intervals:
-- Contacts are detected when **height ≤ 2.0** and **speed ≤ 0.5** for at least **3 frames**.
-- **Apply** maps stored contacts into the current take (FPS-aware when available), locks **world X/Z**, and clamps **world Y** to ground height (default `0.0`) by keying local translation curves.
-- If you change foot/toe names or contact thresholds, re-run **Process** to recompute contacts.
+## Features and Processing Model
 
-### 7. Orientation Alignment (Hips RotY)
-To ensure the character faces the correct direction in-game:
-- The tool calculates a delta: `Target Angle - Current Angle at Frame 0`.
-- This delta is added to **every frame** of the loop.
-- Example: If your mocap starts at 45° but you want 180° (facing back), the tool adds 135° to the entire animation.
-- This is a continuous offset, preventing any "pops" or wrapping issues.
+### Motion routing
 
-### 8. FPS Resampling
-If you export at a different frame rate (e.g., 60 FPS to 30 FPS):
-- The tool uses **Linear Interpolation** to resample position and rotation curves.
-- **Duration is Preserved**: The total time (in seconds) remains exactly the same.
-- **Density Changes**: Data points are reduced (downsampling) or increased (upsampling) to match the target grid.
-- This happens just before writing data to the scene, ensuring the final asset is clean.
+The bundled production Random Forest routes the current Take to `walk`, `run`, or `other` before loop analysis:
 
----
+- Samples 18 standard `FBBodyNodeId` joints from the active characterized Character.
+- Reads world-space joint rotations and Hips translation.
+- Converts Hips translation from centimetres to metres.
+- Resamples input to 30 FPS.
+- Classifies 45-frame windows with a 15-frame stride.
+- Uses a versioned 175-value geometric descriptor and a JSON forest evaluated with pure NumPy.
+- Automatically continues for confident walk/run results.
+- Requires **Analyze Anyway** confirmation for `other` results or unavailable classification.
 
-##  Project Structure
+Changing the active Character, Take, or frame range invalidates the analysis. Run **Analyze Loop Point** again before Process or Apply.
+
+### Gait-cycle detection
+
+For walk and run motion, the analyzer:
+
+- Finds candidates from Hips vertical motion peaks/valleys.
+- Estimates the gait period and prefers a full left-right stride.
+- Scores boundary pose and velocity continuity, with stronger weighting on velocity.
+- Rejects cycles outside the configured minimum and maximum lengths.
+- Rejects near-static segments using an internal minimum average-velocity filter.
+- Optionally rejects segments below the configured minimum vertical bounce.
+
+### Hierarchy-aware seamless processing
+
+The tool samples the selected root hierarchy on integer frames and crops it to the detected `[cycle start ... cycle end]` range. Linear end-to-start offset compensation is applied across the complete segment so the final pose converges to the first pose without a short boundary crossfade.
+
+During Apply:
+
+- The root receives translation and rotation.
+- Child joints receive rotation only, avoiding Character/HumanIK translation jitter.
+- Foot and toe translation is written only by the explicit Foot Contact Fix.
+- Output keys begin at frame 0 and the Take time span is updated to the processed range.
+
+### In-place root motion and orientation
+
+For the root trajectory:
+
+- X and Z translation are set to `0.0`.
+- Y translation is preserved to retain vertical body motion.
+- Rotation is preserved.
+- A uniform Y-rotation offset can align frame 0 to the configured **Hips RotY Target**.
+
+The current processing path assumes MotionBuilder's Y-up coordinate system. The **Up Axis** selector is present in the UI, but Z-up selection is not yet connected to processing.
+
+### Foot-contact correction
+
+When **Enable Foot Contact Fix** is checked, Process detects stance intervals from the original moving Take before in-place conversion. Current internal defaults are:
+
+- Height at or below `2.0` scene units relative to ground height `0.0`.
+- Contact metric at or below `0.5`.
+- At least 3 consecutive frames.
+
+When root motion is available, the contact metric uses relative horizontal acceleration; otherwise it falls back to world-space speed. Apply maps the stored absolute intervals into the output frame range, including FPS conversion, then locks world X/Z and clamps world Y to the ground by keying local foot/toe translations.
+
+Changing foot/toe names or contact parameters requires Process to be run again so contact intervals can be recomputed.
+
+### FPS resampling
+
+Apply can resample output to 30, 60, 90, or 120 FPS. Linear interpolation changes sample density while preserving duration in seconds. The MotionBuilder transport FPS and output Take span are updated accordingly.
+
+## Project Structure
+
+The tree below contains only source, model, report, test, and project files that are not excluded by `.gitignore`.
 
 ```text
 seamless_loop_tool/
-├── launcher.py              #  Drag & Drop entry point for MotionBuilder
+├── .gitignore
+├── .python-version
+├── README.md
+├── launcher.py
+├── pyproject.toml
+├── uv.lock
+├── models/
+│   ├── feature_schema_v1.json
+│   ├── motion_router_v1.json
+│   └── motion_router_v1.sha256
+├── reports/
+│   ├── confusion_matrix.csv
+│   ├── metrics.json
+│   ├── selected_training_windows.csv
+│   └── validation_predictions.csv
 ├── src/
-│   ├── core/                #  Pure Logic (DCC-Agnostic)
-│   │   ├── loop_analysis.py # Algorithms for finding loop points
-│   │   └── root_motion.py   # Math for Root Motion & In-Place processing
-│   ├── mobu/                #  MotionBuilder Adapter Layer
-│   │   ├── adapter.py       # Wrapper around pyfbsdk API
-│   │   └── loop_processor.py# Orchestrator connecting UI to Logic
-│   ├── ui/                  #  User Interface
-│   │   ├── export_fps.py    # FPS selection utilities
-│   │   └── tool_window.py   # PySide tool window definition
-│   ├── pipeline_io.py       # I/O utilities
-│   └── main.py              # Application bootstrap
-└── tests/                   #  Unit Tests (Pytest)
+│   ├── core/
+│   │   ├── loop_analysis.py
+│   │   ├── motion_classifier.py
+│   │   ├── motion_features.py
+│   │   └── root_motion.py
+│   ├── mobu/
+│   │   ├── adapter.py
+│   │   ├── loop_processor.py
+│   │   └── motion_classifier.py
+│   ├── ui/
+│   │   ├── bone_namespace.py
+│   │   ├── export_fps.py
+│   │   ├── motion_routing.py
+│   │   └── tool_window.py
+│   ├── main.py
+│   └── pipeline_io.py
+├── training/
+│   ├── dataset.py
+│   ├── model_export.py
+│   ├── requirements.txt
+│   ├── thresholds.py
+│   └── train_motion_router.py
+└── tests/
+    ├── test_bone_namespace.py
+    ├── test_export_fps.py
     ├── test_loop_analysis.py
-    └── ...
+    ├── test_loop_processor.py
+    ├── test_mobu_adapter.py
+    ├── test_mobu_motion_classifier.py
+    ├── test_motion_classifier.py
+    ├── test_motion_features.py
+    ├── test_root_motion.py
+    ├── test_training_dataset.py
+    ├── test_training_model.py
+    ├── test_ui_motion_routing.py
+    └── test_ui_tool_window.py
 ```
 
----
+## Installation
 
-##  Dependencies
+### 1. Get the project
 
-The tool relies on the following Python libraries:
+```bash
+git clone https://github.com/XIONGTAO-1/seamless-loop-tool.git
+cd seamless-loop-tool
+```
 
-1.  **`pyfbsdk`**: Built-in MotionBuilder SDK.
-2.  **`PySide2`** or **`PySide6`**: Built-in UI framework (Qt) in modern MotionBuilder.
-3.  **`numpy`**: **[Required]** Used for high-performance matrix and vector math.
+### 2. Check MotionBuilder's Python compatibility
 
-The optional model-training environment is separate from MotionBuilder and uses Python 3.11 plus scikit-learn 1.9.0. MotionBuilder inference still requires only NumPy.
+Run this in MotionBuilder's Python Editor on the target computer:
 
----
+```python
+import platform
+import sys
 
-## Walk / Run / Other Motion Router
+print(sys.version)
+print(platform.system())
+print(platform.machine())
+```
 
-The repository includes a versioned geometric descriptor, a trained Random Forest JSON model, and a pure NumPy MotionBuilder adapter. The UI classifies the current characterized Character before loop analysis. Walk and run continue to the existing gait-cycle detector; other results and classification failures require explicit confirmation before analysis continues.
+Record the Python major/minor version, operating system, and CPU architecture. NumPy must match all three.
 
-### Train and evaluate externally
+### 3. Create a plugin-local runtime environment
+
+The launcher can add this project's `.venv` `site-packages` directory to MotionBuilder's module search path. MotionBuilder does **not** activate or switch to the virtual environment; it continues to use its embedded interpreter.
+
+Create `.venv` on the same type of machine that will run MotionBuilder. For example, if MotionBuilder embeds 64-bit CPython 3.10 on Windows:
+
+```powershell
+uv venv --python 3.10 .venv
+uv pip install --python .venv\Scripts\python.exe "numpy>=1.21"
+```
+
+Without uv:
+
+```powershell
+py -3.10 -m venv .venv
+.venv\Scripts\python.exe -m pip install "numpy>=1.21"
+```
+
+On Linux, use `.venv/bin/python` in place of `.venv\Scripts\python.exe`.
+
+Do not copy a virtual environment between Windows, Linux, or macOS; between x86-64 and ARM64; or between different Python major/minor versions. Recreate it on the target platform. A macOS ARM64 Python 3.10 environment, for example, cannot provide NumPy to Windows x64 MotionBuilder.
+
+### 4. Launch in MotionBuilder
+
+1. Open MotionBuilder.
+2. Drag `launcher.py` into the 3D Viewer.
+3. Choose **Execute**.
+4. Complete the Character Definition/Characterization prerequisites before using Analyze.
+
+## Namespace and Multiple-Character Scenes
+
+MotionBuilder scenes often contain names such as `CharacterA:Hips` and `CharacterB:Hips`. The UI provides a **Namespace** field and a **Get from Selected** button:
+
+1. Select any bone from the intended character.
+2. Click **Get from Selected** beside Namespace.
+3. The namespace is extracted from the selected bone's complete name.
+4. Root, Left/Right Foot, and Left/Right Toe fields are updated with that namespace.
+
+Entering `CharacterA` or `CharacterA:` produces the normalized prefix `CharacterA:`. Applying a new namespace replaces any existing prefix instead of stacking prefixes.
+
+Unqualified names are accepted only when they resolve to exactly one scene model. If two namespaces both contain `LeftLeg`, the adapter raises an ambiguity error and lists the matches. Use a complete MotionBuilder `LongName`, such as `CharacterA:LeftLeg`; the plugin must not silently choose the first match.
+
+The classifier itself reads standardized body nodes from the active characterized Character, while hierarchy processing resolves the explicit Root/Foot/Toe names. Configure both the active Character and the namespace fields correctly in multi-character scenes.
+
+## UI Reference
+
+### Bone and output controls
+
+| Control | Default | Current behavior |
+| --- | ---: | --- |
+| Root Bone | `Hips` | Root used for loop analysis and hierarchy traversal. |
+| Namespace | empty | Qualifies Root, Foot, and Toe fields; can be captured from a selected bone. |
+| Left Foot / Right Foot | `LeftFoot` / `RightFoot` | Bones used for stance detection and correction. |
+| Left Toe / Right Toe | `LeftToeBase` / `RightToeBase` | Optional toe samples used with the corresponding foot. |
+| Blend Frames | `5` | Retained for API/UI compatibility; current linear full-segment compensation does not use a short blend window. |
+| Up Axis | Y-Up | Selector is visible; current processing remains Y-up. |
+| Create new Take | enabled | Preserves the original and writes processed data to a clean Take. |
+| Enable Foot Contact Fix | disabled | Detects contacts during Process and applies correction during Apply when enabled. |
+
+### Advanced controls
+
+| Control | Default | Current behavior |
+| --- | ---: | --- |
+| Min Cycle Frames | `20` | Shortest accepted cycle candidate. |
+| Max Cycle Frames | `60` | Longest accepted cycle candidate. |
+| Min Vertical Bounce | `0.0` | Minimum accepted Hips vertical range. |
+| Hips RotY Target | `180.0` | Desired root Y rotation at output frame 0. |
+| Export FPS | `30` | Output choices: 30, 60, 90, or 120 FPS. |
+
+The **Motion Type** panel shows the routed label, confidence, walk/run/other probabilities, analyzed window count, and any diagnostic message.
+
+## MotionBuilder Workflow
+
+1. Load the animated skeleton and confirm the current Take and frame range.
+2. Define and characterize the skeleton, then select its Character in Character Controls.
+3. In multi-character scenes, capture or enter the intended namespace.
+4. Set Root, Foot, and Toe bone names; use each **Get Selected** button when appropriate.
+5. Configure cycle limits, vertical bounce, target orientation, output FPS, Take preservation, and Foot Contact Fix.
+6. Click **1. Analyze Loop Point**.
+   - The full current Take is classified first.
+   - Confident walk/run motion continues automatically.
+   - `other` or unavailable classification requires confirmation.
+   - The gait analyzer then reports the selected cycle range.
+7. Click **2. Process (Trim + Blend + In-Place)**.
+   - The hierarchy is sampled and processed in memory.
+   - Foot contacts are detected from the original moving Take when enabled.
+8. Click **3. Apply Changes to Scene**.
+   - A clean Take is created when preservation is enabled.
+   - Processed keys, optional foot correction, output FPS, and Take span are applied.
+9. Inspect the loop boundary, feet, knee direction, root height, and orientation before export.
+
+## Local Development
+
+Local development and tests use Python 3.10 or newer. The repository pins `3.10` in `.python-version`.
+
+With uv:
+
+```bash
+uv sync
+uv run pytest -q
+```
+
+Without uv:
+
+```bash
+python -m venv .venv
+source .venv/bin/activate            # Windows: .venv\Scripts\activate
+python -m pip install -e .
+python -m pytest -q
+```
+
+`pyfbsdk` and MotionBuilder's PySide package are not installed by this local setup. Unit tests use adapters and stubs so core logic can run outside MotionBuilder.
+
+## Training the Motion Router
+
+Training is optional and separate from MotionBuilder inference. The checked-in training requirements use Python 3.11, NumPy 2.x, and scikit-learn 1.9.0.
 
 ```bash
 python3.11 -m venv .venv-training
@@ -121,101 +306,55 @@ python3.11 -m venv .venv-training
   --dataset-root /path/to/processed_amass_babel_router
 ```
 
-Training writes `models/motion_router_v1.json`, its SHA-256 file, the feature schema, and audit reports under `reports/`. The default command uses 30 randomized parameter candidates, five source-grouped folds, and the fixed seed `42`.
+The training command writes or refreshes:
 
-### Classify a characterized MotionBuilder character
+- `models/motion_router_v1.json`
+- `models/motion_router_v1.sha256`
+- `models/feature_schema_v1.json`
+- Evaluation artifacts under `reports/`
 
-```python
-from pathlib import Path
+The default search uses 30 randomized parameter candidates, five source-grouped folds, and random seed `42`. Runtime loading verifies the model metadata and checksum; experimental models require `allow_experimental=True`.
 
-from mobu.motion_classifier import MotionClassifier
+## Troubleshooting
 
-classifier = MotionClassifier(Path("models/motion_router_v1.json"))
-result = classifier.classify_character(character)
-print(result.label, result.confidence, result.reason)
-```
+### `Error importing numpy: you should not try to import numpy from its source directory`
 
-The sampler reads the 18 standard `FBBodyNodeId` slots, converts Hips translation from centimeters to meters, resamples to 30 FPS, and classifies 45-frame windows with a 15-frame stride. Missing characterization, missing joints, short clips, invalid data, schema mismatch, checksum failure, or a damaged model safely return `other` with a diagnostic `reason`. Experimental models require `allow_experimental=True` when constructing `MotionClassifier`.
+This message commonly appears when NumPy's compiled extension cannot load; it does not necessarily mean the project is inside the NumPy source tree.
 
-### MotionBuilder UI workflow
+1. Check MotionBuilder's Python version, operating system, and architecture with the snippet in Installation.
+2. Remove or move the incompatible project `.venv`.
+3. Recreate `.venv` on the target computer with the matching Python major/minor version and architecture.
+4. Confirm the project does not contain an unrelated `numpy.py` file or `numpy/` source directory.
+5. Restart MotionBuilder so failed imports are cleared from `sys.modules`.
 
-Select the active character in Character Controls, then click **Analyze Loop Point**. The tool classifies the full current Take and shows the walk, run, and other probabilities. Walk and run proceed automatically. Other motions or unavailable classifications show a confirmation dialog because the current loop detector is gait-specific. Changing the active Character, Take, or frame range invalidates the analysis and requires Analyze to run again before Process or Apply.
+Installing uv alone does not solve the problem; uv must install a compatible NumPy build into the environment loaded by the plugin.
 
----
+### `pyfbsdk` or PySide cannot be imported
 
-##  Installation & Setup
+Run `launcher.py` inside MotionBuilder. These packages normally come from MotionBuilder and are not supplied by the local development environment. The UI tries PySide2 first and PySide6 second.
 
-### 1. Clone the Repository
-```bash
-git clone https://github.com/XIONGTAO-1/seamless-loop-tool.git
-cd seamless_loop_tool
-```
+### Motion classification is unavailable
 
-### 2. Configure Virtual Environment 
-If you want to run the unit tests locally (outside MotionBuilder), set up a virtual environment.
-Local development uses **Python 3.10+** (see `pyproject.toml` / `.python-version`):
-```bash
-python -m venv .venv
-source .venv/bin/activate  # or .venv\Scripts\activate on Windows
-pip install -e .
-```
+Confirm that:
 
+- A Character is current in Character Controls.
+- The Character Definition is valid and the Character is characterized.
+- All required standard body nodes are mapped.
+- The Take contains at least 45 frames after 30 FPS resampling.
+- `models/motion_router_v1.json` and its checksum file are present and unmodified.
 
----
+The dialog can continue with **Analyze Anyway**, but the loop detector is specialized for gait motion.
 
-## 🎮 Usage Guide
+### Bone name is ambiguous or not found
 
-### Launching the Tool
-1. Open **Autodesk MotionBuilder**.
-2. Locate `launcher.py` in your file explorer.
-3. **Drag and Drop** `launcher.py` directly into the MotionBuilder 3D Viewport.
-4. Select **"Execute"**.
+Capture the intended namespace from a selected bone or enter complete `LongName` values. Unqualified duplicate names intentionally fail instead of selecting an arbitrary character.
 
-### Tool Parameters
+### Process or Apply becomes disabled
 
-#### Basic Settings
-- **Root Bone**: The name of your character's hip bone (e.g., `Hips`, `Reference`). Click "Get Selected" to auto-fill.
-- **Left Foot / Right Foot**: Foot bone names used for contact detection (e.g., `LeftFoot`, `RightFoot`).
-- **Left Toe / Right Toe**: Toe bone names used for contact detection (e.g., `LeftToeBase`, `RightToeBase`).
-- **Up Axis**: UI selector exists, but current implementation assumes MotionBuilder's Y-up processing (not wired yet).
-- **Blend Frames**: Number of frames to blend the end into the start.
-  - *Note*: Current implementation uses linear offset compensation across the full segment, so this value does not change results (kept for API/UI compatibility).
-- **Create New Take**: Always recommended. Keeps your original take safe.
-- **Enable Foot Contact Fix**: When checked, contacts are computed during **Process** from the original take and **Apply** uses stored contacts to clamp foot/toe bones.
-  - If you change foot/toe names or contact thresholds, re-run **Process** before Apply.
-
-#### Advanced Settings (The "Secret Sauce")
-- **Min Cycle Frames**: 
-  - The tool won't accept loops shorter than this.
-  - *Default*: `20`. (Prevents detecting a single step as a full cycle).
-- **Max Cycle Frames**: 
-  - Upper limit for loop search.
-  - *Default*: `60`.
-- **Min Vertical Bounce**:
-  - **Critical for Walks**. Ensures the character is actually bobbing up and down.
-  - Checks if `(MaxY - MinY) >= Threshold`.
-  - *Default*: `0.0`. Increase this if the tool is picking "sliding" loops.
-- **Hips RotY Target**:
-  - Sets the starting Y-rotation (heading) of the Hips at frame 0.
-  - The entire animation is rotated to match this starting angle.
-  - *Default*: `180.0` (typically facing "back" or "forward" depending on convention).
-- **Export FPS**:
-  - Resamples the output animation to a specific frame rate (e.g., 30, 60).
-  - Useful for game engine export requirements.
-
-### Step-by-Step Workflow
-1.  **Select your character's hips** in the scene.
-2.  Click **"1. Analyze Loop Point"**. The tool detects and displays a **cycle range** (e.g., `Cycle: 120 - 298`).
-3.  Click **"2. Process"**. This runs the math in memory for the entire hierarchy (Crop, Seamless Compensation, Root In-Place, RotY Align).
-4.  Click **"3. Apply Changes to Scene"**. This writes the data to the new take.
-
----
+Changing the Character, Take, or frame range invalidates the previous analysis. Run Analyze again, then Process, before Apply.
 
 ## Author
 
-**Name**: niexiongtao  
-**Contact**: niexiongtao@gmail.com
+**niexiongtao**
 
----
-
-*Verified on MotionBuilder 2024 (Linux/Windows).*
+niexiongtao@gmail.com
