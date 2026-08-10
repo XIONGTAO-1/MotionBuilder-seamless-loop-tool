@@ -56,9 +56,9 @@ For walk and run motion, the analyzer:
 - Finds candidates from Hips vertical motion peaks/valleys.
 - Estimates the gait period and prefers a full left-right stride.
 - Scores boundary pose and velocity continuity, with stronger weighting on velocity.
-- Rejects cycles outside the configured minimum and maximum lengths.
-- Rejects near-static segments using an internal minimum average-velocity filter.
-- Optionally rejects segments below the configured minimum vertical bounce.
+- Uses the configured cycle limits to guide peak spacing, period estimation, and candidate scoring; full-stride candidates may extend to `2.5 × Max Cycle Frames`.
+- Filters near-static segments and segments below the configured vertical bounce during peak-based candidate scoring.
+- Falls back to the first half of the Take when fewer than two peak/valley candidates are available; that fallback does not apply the candidate length, velocity, or bounce filters.
 
 ### Hierarchy-aware seamless processing
 
@@ -245,9 +245,9 @@ The classifier itself reads standardized body nodes from the active characterize
 
 | Control | Default | Current behavior |
 | --- | ---: | --- |
-| Min Cycle Frames | `20` | Shortest accepted cycle candidate. |
-| Max Cycle Frames | `60` | Longest accepted cycle candidate. |
-| Min Vertical Bounce | `0.0` | Minimum accepted Hips vertical range. |
+| Min Cycle Frames | `20` | Minimum duration used by the peak-based candidate search. |
+| Max Cycle Frames | `60` | Period-search limit; full-stride candidate pairs may extend to 2.5 times this value. |
+| Min Vertical Bounce | `0.0` | Minimum Hips vertical range used during scored candidate evaluation. |
 | Hips RotY Target | `180.0` | Desired root Y rotation at output frame 0. |
 | Export FPS | `30` | Output choices: 30, 60, 90, or 120 FPS. |
 
