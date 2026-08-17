@@ -1,6 +1,7 @@
 # Python-generated files
 __pycache__/
 *.py[oc]
+.DS_Store
 build/
 dist/
 wheels/
@@ -14,6 +15,11 @@ docs/
 tmp/
 outputs/
 output/
+
+# Licensed AMASS/BABEL inputs and generated training data
+HDM05/
+babel_v1.0_release/
+processed_amass_babel_router/
 
 # Planning artifacts
 findings.md

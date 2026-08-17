@@ -5,6 +5,12 @@
 
 **Version:** 2.1.0
 
+## Demo Video
+
+[![Watch the Seamless Loop Tool demonstration on YouTube](https://img.youtube.com/vi/U8uT9hT65pY/maxresdefault.jpg)](https://youtu.be/U8uT9hT65pY)
+
+
+
 Seamless Loop Tool creates in-place walk and run cycles directly in Autodesk MotionBuilder. It combines motion-type routing, gait-cycle detection, hierarchy-aware loop processing, root-motion removal, orientation alignment, FPS resampling, namespace-safe bone lookup, and optional foot-contact correction in one non-destructive workflow.
 
 The MotionBuilder runtime uses `pyfbsdk`, PySide, and NumPy. The bundled motion router performs inference with pure NumPy; scikit-learn is required only when training a replacement model outside MotionBuilder.
@@ -107,6 +113,14 @@ seamless_loop_tool/
 ├── .gitignore
 ├── .python-version
 ├── README.md
+├── data_preprocessing/
+│   ├── amass_babel_router/
+│   │   ├── __init__.py
+│   │   ├── features.py
+│   │   ├── intervals.py
+│   │   ├── labels.py
+│   │   └── pipeline.py
+│   └── prepare_amass_babel_router.py
 ├── launcher.py
 ├── pyproject.toml
 ├── uv.lock
@@ -143,6 +157,7 @@ seamless_loop_tool/
 │   ├── thresholds.py
 │   └── train_motion_router.py
 └── tests/
+    ├── test_amass_babel_pipeline.py
     ├── test_bone_namespace.py
     ├── test_export_fps.py
     ├── test_loop_analysis.py
@@ -299,12 +314,78 @@ python -m pytest -q
 
 Training is optional and separate from MotionBuilder inference. The checked-in training requirements use Python 3.11, NumPy 2.x, and scikit-learn 1.9.0.
 
+### Download and prepare AMASS/BABEL data
+
+This repository does not distribute AMASS, BABEL, or generated training windows. Obtain access to and download the required data yourself:
+
+1. Open the repository's `data_preprocessing/` directory.
+2. Download the AMASS HDM05 motion archives from [AMASS](https://amass.is.tue.mpg.de/), then extract them into the current `data_preprocessing/` directory as `HDM05/`. The preprocessing pipeline expects the BABEL-referenced paths below it, such as `HDM05/MPI_HDM05/...`.
+3. Download BABEL v1.0 annotations from [BABEL](https://babel.is.tue.mpg.de/), then extract them into the same `data_preprocessing/` directory as `babel_v1.0_release/`. This directory must contain `train.json` and `val.json`.
+4. Follow the AMASS and BABEL licenses. Do not commit, upload, or redistribute the downloaded archives, annotations, or generated dataset.
+
+The resulting local layout should be:
+
+```text
+data_preprocessing/
+├── prepare_amass_babel_router.py
+├── amass_babel_router/
+│   ├── features.py
+│   ├── intervals.py
+│   ├── labels.py
+│   └── pipeline.py
+├── HDM05/
+│   └── MPI_HDM05/
+├── babel_v1.0_release/
+│   ├── train.json
+│   └── val.json
+└── processed_amass_babel_router/  # created by the preprocessing script
+```
+
+`HDM05/`, `babel_v1.0_release/`, and `processed_amass_babel_router/` are excluded by `.gitignore` wherever they appear in the repository.
+
+From the repository root, enter `data_preprocessing/` and prepare the classifier dataset:
+
+```bash
+cd data_preprocessing
+
+python3 prepare_amass_babel_router.py \
+  --amass-root HDM05 \
+  --babel-root babel_v1.0_release \
+  --output-root processed_amass_babel_router
+
+cd ..
+```
+
+The script reads BABEL's `train.json` and `val.json`, resolves the referenced AMASS HDM05 motion archives, creates labeled clips and 45-frame feature windows, and writes the generated dataset to `processed_amass_babel_router/`. Use `--overwrite` only when you intend to replace an existing generated dataset.
+
+### Train a replacement model
+
 ```bash
 python3.11 -m venv .venv-training
 .venv-training/bin/pip install -r training/requirements.txt
 .venv-training/bin/python training/train_motion_router.py \
-  --dataset-root /path/to/processed_amass_babel_router
+  --dataset-root data_preprocessing/processed_amass_babel_router
 ```
+
+Training parameters:
+
+| Parameter | Required/default | Meaning |
+| --- | --- | --- |
+| `--dataset-root` | Required | Path to the preprocessed dataset. It must contain `windows.jsonl` and the window files referenced by that manifest. |
+| `--output-root` | Repository root | Directory in which `models/` and `reports/` are written. |
+| `--max-windows-per-source-class` | `10` | Maximum number of evenly sampled training windows kept for each source motion and coarse class. Raising it uses more data but increases training time and memory use. |
+| `--search-iterations` | `30` | Number of random-forest hyperparameter combinations tested. Raising it broadens the search but takes longer. |
+| `--random-state` | `42` | Random seed used for reproducible data splits and parameter search. |
+| `--n-jobs` | `-1` | Number of parallel scikit-learn workers; `-1` uses all available CPU cores. |
+| `--verbose` | `1` | scikit-learn search log level; use `0` for quiet output and a larger value for more detail. |
+
+#### What the training uses
+
+- **Data and labels:** the processed AMASS motion windows and BABEL annotations. Detailed BABEL categories are reduced to the three router classes `walk`, `run`, and `other`.
+- **Motion features:** each 45-frame window is sampled at 30 FPS. Its 22-joint rotations and root velocity are summarized as a 175-dimensional descriptor containing joint angular motion, root speed and acceleration, body-part motion energy, left/right symmetry, and motion periodicity.
+- **Model selection:** scikit-learn trains a class-balanced random forest. A randomized hyperparameter search selects the model by macro F1 using five source-grouped folds, so windows from the same source motion do not appear on both sides of a cross-validation fold.
+- **Routing thresholds:** out-of-fold probabilities are averaged per clip and used to calibrate conservative `walk` and `run` probability thresholds. Predictions that do not pass those thresholds can fall back to `other`.
+- **Evaluation and export:** the separate validation split is reported at both window and clip level. The selected forest is exported to JSON for pure-NumPy inference in MotionBuilder, then checked against scikit-learn predictions for numerical and label parity.
 
 The training command writes or refreshes:
 
